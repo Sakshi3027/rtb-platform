@@ -21,6 +21,7 @@
         <junit.version>5.11.4</junit.version>
         <jackson.version>2.18.2</jackson.version>
         <hdrhistogram.version>2.2.2</hdrhistogram.version>
+        <netty.version>4.1.115.Final</netty.version>
     </properties>
 
     <dependencyManagement>
@@ -46,6 +47,13 @@
                 <groupId>com.fasterxml.jackson</groupId>
                 <artifactId>jackson-bom</artifactId>
                 <version>${jackson.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
                 <type>pom</type>
                 <scope>import</scope>
             </dependency>
