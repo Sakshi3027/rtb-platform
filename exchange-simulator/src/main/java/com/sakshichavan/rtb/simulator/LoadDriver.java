@@ -21,9 +21,8 @@ import java.util.concurrent.locks.LockSupport;
 
 /**
  * Open-loop load driver: sends requests on a fixed schedule regardless of how the bidder
- * is responding, and measures latency from each request's intended send time.
- * This avoids coordinated omission, where a stalled server makes a naive tester send less
- * and hide the slowdown.
+ * is responding. Records response time (from the scheduled send, avoiding coordinated omission)
+ * and service time (from the actual send) so delays can be attributed to sender or bidder.
  */
 public final class LoadDriver implements AutoCloseable {
 
@@ -51,7 +50,8 @@ public final class LoadDriver implements AutoCloseable {
         }
         long intervalNanos = TimeUnit.SECONDS.toNanos(1) / qps;
 
-        Histogram latency = new ConcurrentHistogram(MAX_LATENCY_MICROS, 3);
+        Histogram responseTime = new ConcurrentHistogram(MAX_LATENCY_MICROS, 3);
+        Histogram serviceTime = new ConcurrentHistogram(MAX_LATENCY_MICROS, 3);
         Outcomes outcomes = new Outcomes();
         CountDownLatch completed = new CountDownLatch((int) totalRequests);
 
@@ -67,10 +67,12 @@ public final class LoadDriver implements AutoCloseable {
                     .POST(HttpRequest.BodyPublishers.ofByteArray(OpenRtbJson.write(request)))
                     .build();
 
+            long actualStart = System.nanoTime();
             client.sendAsync(httpRequest, HttpResponse.BodyHandlers.ofByteArray())
                     .whenComplete((response, error) -> {
-                        long micros = (System.nanoTime() - intendedStart) / 1_000;
-                        latency.recordValue(Math.min(micros, MAX_LATENCY_MICROS));
+                        long now = System.nanoTime();
+                        record(responseTime, now - intendedStart);
+                        record(serviceTime, now - actualStart);
                         outcomes.record(request, response, error);
                         completed.countDown();
                     });
@@ -78,7 +80,12 @@ public final class LoadDriver implements AutoCloseable {
         double sendSeconds = (System.nanoTime() - start) / 1e9;
 
         completed.await(30, TimeUnit.SECONDS);
-        return outcomes.toReport(totalRequests, totalRequests / sendSeconds, latency);
+        return outcomes.toReport(totalRequests, totalRequests / sendSeconds,
+                LatencySummary.from(responseTime), LatencySummary.from(serviceTime));
+    }
+
+    private static void record(Histogram histogram, long elapsedNanos) {
+        histogram.recordValue(Math.min(elapsedNanos / 1_000, MAX_LATENCY_MICROS));
     }
 
     private static void waitUntil(long deadlineNanos) {
@@ -134,16 +141,11 @@ public final class LoadDriver implements AutoCloseable {
             }
         }
 
-        LoadReport toReport(long requests, double sendRate, Histogram latency) {
+        LoadReport toReport(long requests, double sendRate, LatencySummary responseTime, LatencySummary serviceTime) {
             return new LoadReport(
                     requests,
                     bids.sum(), noBids.sum(), invalid.sum(), timeouts.sum(), errors.sum(),
-                    sendRate,
-                    latency.getValueAtPercentile(50.0),
-                    latency.getValueAtPercentile(90.0),
-                    latency.getValueAtPercentile(99.0),
-                    latency.getValueAtPercentile(99.9),
-                    latency.getMaxValue());
+                    sendRate, responseTime, serviceTime);
         }
     }
 }

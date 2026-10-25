@@ -47,6 +47,17 @@ class LoadDriverTest {
     void latencyReflectsBidderDelay() throws Exception {
         LoadReport report = runAgainst(Duration.ofMillis(20), 1.0, 100);
 
-        assertTrue(report.p50Micros() >= 20_000, "p50 was " + report.p50Micros() + " micros");
+        assertTrue(report.responseTime().p50Micros() >= 20_000,
+                "response p50 was " + report.responseTime().p50Micros() + " micros");
+        assertTrue(report.serviceTime().p50Micros() >= 20_000,
+                "service p50 was " + report.serviceTime().p50Micros() + " micros");
+    }
+
+    @Test
+    void responseTimeIsNeverBelowServiceTime() throws Exception {
+        LoadReport report = runAgainst(Duration.ofMillis(5), 1.0, 200);
+
+        assertTrue(report.responseTime().p50Micros() >= report.serviceTime().p50Micros());
+        assertTrue(report.responseTime().maxMicros() >= report.serviceTime().maxMicros());
     }
 }

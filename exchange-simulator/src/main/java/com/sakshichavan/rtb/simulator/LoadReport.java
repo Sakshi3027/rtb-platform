@@ -1,8 +1,11 @@
 package com.sakshichavan.rtb.simulator;
 
 /**
- * Results of one load test run. Latencies are measured from each request's
- * intended send time, so stalls in the bidder show up in the tail (no coordinated omission).
+ * Results of one load test run.
+ * responseTime: measured from each request's scheduled send time (what an exchange experiences;
+ *               includes any lag in the sender, so there is no coordinated omission).
+ * serviceTime:  measured from the actual send time (network plus bidder only).
+ * A large gap between the two tails means the sender fell behind schedule, not the bidder.
  */
 public record LoadReport(
         long requests,
@@ -12,11 +15,8 @@ public record LoadReport(
         long timeouts,
         long errors,
         double sendRate,
-        long p50Micros,
-        long p90Micros,
-        long p99Micros,
-        long p999Micros,
-        long maxMicros) {
+        LatencySummary responseTime,
+        LatencySummary serviceTime) {
 
     public long completed() {
         return bids + noBids + invalid + timeouts + errors;
@@ -24,13 +24,14 @@ public record LoadReport(
 
     public String summary() {
         return """
-                requests   %d sent, %d completed, at %.0f req/s
-                outcomes   bids %d | no-bids %d | invalid %d | timeouts %d | errors %d
-                latency ms p50 %.2f | p90 %.2f | p99 %.2f | p99.9 %.2f | max %.2f"""
+                requests     %d sent, %d completed, at %.0f req/s
+                outcomes     bids %d | no-bids %d | invalid %d | timeouts %d | errors %d
+                response ms  %s   (from scheduled send)
+                service ms   %s   (from actual send)"""
                 .formatted(
                         requests, completed(), sendRate,
                         bids, noBids, invalid, timeouts, errors,
-                        p50Micros / 1000.0, p90Micros / 1000.0, p99Micros / 1000.0,
-                        p999Micros / 1000.0, maxMicros / 1000.0);
+                        responseTime.format(),
+                        serviceTime.format());
     }
 }
