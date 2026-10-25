@@ -20,6 +20,7 @@
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <junit.version>5.11.4</junit.version>
         <jackson.version>2.18.2</jackson.version>
+        <hdrhistogram.version>2.2.2</hdrhistogram.version>
     </properties>
 
     <dependencyManagement>
@@ -28,6 +29,11 @@
                 <groupId>com.sakshichavan.rtb</groupId>
                 <artifactId>common</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.hdrhistogram</groupId>
+                <artifactId>HdrHistogram</artifactId>
+                <version>${hdrhistogram.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit</groupId>

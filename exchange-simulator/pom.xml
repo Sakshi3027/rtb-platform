@@ -17,5 +17,9 @@
             <groupId>com.sakshichavan.rtb</groupId>
             <artifactId>common</artifactId>
         </dependency>
+        <dependency>
+            <groupId>org.hdrhistogram</groupId>
+            <artifactId>HdrHistogram</artifactId>
+        </dependency>
     </dependencies>
 </project>
