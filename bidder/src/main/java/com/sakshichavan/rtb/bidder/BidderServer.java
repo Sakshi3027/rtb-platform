@@ -12,6 +12,7 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 
 import java.net.InetSocketAddress;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Netty HTTP server for the bidder.
@@ -21,6 +22,8 @@ import java.net.InetSocketAddress;
 public final class BidderServer implements AutoCloseable {
 
     private static final int MAX_REQUEST_BYTES = 64 * 1024;
+    private static final long SHUTDOWN_QUIET_MILLIS = 100;
+    private static final long SHUTDOWN_TIMEOUT_MILLIS = 5_000;
 
     private final EventLoopGroup bossGroup = new NioEventLoopGroup(1);
     private final EventLoopGroup workerGroup = new NioEventLoopGroup();
@@ -61,8 +64,15 @@ public final class BidderServer implements AutoCloseable {
         shutdownGroups();
     }
 
+    /**
+     * Stops accepting work, lets in-flight tasks finish, then stops the threads.
+     * Netty's default quiet period is 2s per group, which slows every deploy; 100ms is enough
+     * because the server channel is already closed before this runs.
+     */
     private void shutdownGroups() {
-        bossGroup.shutdownGracefully().syncUninterruptibly();
-        workerGroup.shutdownGracefully().syncUninterruptibly();
+        bossGroup.shutdownGracefully(SHUTDOWN_QUIET_MILLIS, SHUTDOWN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        workerGroup.shutdownGracefully(SHUTDOWN_QUIET_MILLIS, SHUTDOWN_TIMEOUT_MILLIS, TimeUnit.MILLISECONDS);
+        bossGroup.terminationFuture().syncUninterruptibly();
+        workerGroup.terminationFuture().syncUninterruptibly();
     }
 }
