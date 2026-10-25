@@ -1,5 +1,8 @@
 package com.sakshichavan.rtb.common.openrtb;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+import com.fasterxml.jackson.annotation.JsonValue;
+
 /**
  * OpenRTB auction type. On the wire it is an integer: 1 = first price, 2 = second price.
  * First price: the winner pays its own bid. Second price: the winner pays the second-highest bid.
@@ -14,10 +17,12 @@ public enum AuctionType {
         this.code = code;
     }
 
+    @JsonValue
     public int code() {
         return code;
     }
 
+    @JsonCreator
     public static AuctionType fromCode(int code) {
         for (AuctionType type : values()) {
             if (type.code == code) {

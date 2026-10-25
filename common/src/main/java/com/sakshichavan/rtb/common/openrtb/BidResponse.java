@@ -1,5 +1,7 @@
 package com.sakshichavan.rtb.common.openrtb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -10,7 +12,10 @@ import java.util.stream.Collectors;
  * Response to a BidRequest. A no-bid is NOT represented here: per OpenRTB,
  * the bidder returns HTTP 204 with no body, so a BidResponse always has bids.
  */
-public record BidResponse(String id, List<SeatBid> seatBid, String cur) {
+public record BidResponse(
+        String id,
+        @JsonProperty("seatbid") List<SeatBid> seatBid,
+        String cur) {
 
     public BidResponse {
         Objects.requireNonNull(id, "response.id is required");

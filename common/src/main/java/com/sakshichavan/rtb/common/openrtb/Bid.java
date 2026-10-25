@@ -1,12 +1,20 @@
 package com.sakshichavan.rtb.common.openrtb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Objects;
 
 /**
  * A bid for one impression. price is CPM in the response currency.
  * nurl is the win notice URL the exchange calls if this bid wins.
  */
-public record Bid(String id, String impId, double price, String adId, String crId, String nurl) {
+public record Bid(
+        String id,
+        @JsonProperty("impid") String impId,
+        double price,
+        @JsonProperty("adid") String adId,
+        @JsonProperty("crid") String crId,
+        String nurl) {
 
     public Bid {
         Objects.requireNonNull(id, "bid.id is required");

@@ -1,9 +1,15 @@
 package com.sakshichavan.rtb.common.openrtb;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
+
 import java.util.Objects;
 
 /** One impression (ad slot) being auctioned. bidFloor is the minimum CPM price. */
-public record Imp(String id, Banner banner, double bidFloor, String bidFloorCur) {
+public record Imp(
+        String id,
+        Banner banner,
+        @JsonProperty("bidfloor") double bidFloor,
+        @JsonProperty("bidfloorcur") String bidFloorCur) {
 
     public Imp {
         Objects.requireNonNull(id, "imp.id is required");
