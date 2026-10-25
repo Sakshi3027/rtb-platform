@@ -1,7 +1,9 @@
 package com.sakshichavan.rtb.bidder;
 
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
+import com.sakshichavan.rtb.bidder.campaign.Targeting;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
+import com.sakshichavan.rtb.common.openrtb.AuctionType;
 import com.sakshichavan.rtb.common.openrtb.Banner;
 import com.sakshichavan.rtb.common.openrtb.Bid;
 import com.sakshichavan.rtb.common.openrtb.BidRequest;
@@ -11,19 +13,20 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TargetingBidEngineTest {
 
-    private static BidRequest requestWithFloor(double floor) {
+    private static BidRequest request(double floor, AuctionType auctionType) {
         Imp imp = new Imp("imp-1", new Banner(300, 250), floor, "USD");
-        return new BidRequest("req-1", List.of(imp), null, null, null, 100, null);
+        return new BidRequest("req-1", List.of(imp), null, null, null, 100, auctionType);
     }
 
     private static TargetingBidEngine engineWith(Campaign... campaigns) {
-        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)));
+        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)), new BidPricer(0.5));
     }
 
     private static Bid onlyBid(BidResponse response) {
@@ -31,15 +34,24 @@ class TargetingBidEngineTest {
     }
 
     @Test
-    void bidsWithHighestPayingMatchingCampaign() {
+    void secondPriceBidsHighestValueCampaignAtFullValue() {
         TargetingBidEngine engine = engineWith(
                 new Campaign("cheap", "cr-1", 1.00, null),
                 new Campaign("premium", "cr-2", 2.50, null));
 
-        BidResponse response = engine.evaluate(requestWithFloor(0.50)).orElseThrow();
+        BidResponse response = engine.evaluate(request(0.50, AuctionType.SECOND_PRICE)).orElseThrow();
 
         assertEquals("premium", onlyBid(response).adId());
         assertEquals(2.50, onlyBid(response).price());
+    }
+
+    @Test
+    void firstPriceShadesTheBid() {
+        TargetingBidEngine engine = engineWith(new Campaign("premium", "cr-2", 2.50, null));
+
+        BidResponse response = engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).orElseThrow();
+
+        assertEquals(1.50, onlyBid(response).price());
     }
 
     @Test
@@ -48,7 +60,7 @@ class TargetingBidEngineTest {
                 new Campaign("cheap", "cr-1", 1.00, null),
                 new Campaign("premium", "cr-2", 2.50, null));
 
-        Optional<BidResponse> response = engine.evaluate(requestWithFloor(3.00));
+        Optional<BidResponse> response = engine.evaluate(request(3.00, AuctionType.FIRST_PRICE));
 
         assertTrue(response.isEmpty());
     }
@@ -56,7 +68,7 @@ class TargetingBidEngineTest {
     @Test
     void producesResponsesTheExchangeAccepts() {
         TargetingBidEngine engine = engineWith(new Campaign("only", "cr-1", 1.50, null));
-        BidRequest request = requestWithFloor(0.75);
+        BidRequest request = request(0.75, AuctionType.FIRST_PRICE);
 
         BidResponse response = engine.evaluate(request).orElseThrow();
 
@@ -66,10 +78,9 @@ class TargetingBidEngineTest {
 
     @Test
     void noBidWhenNoCampaignTargetsTheRequest() {
-        Campaign usOnly = new Campaign("us-only", "cr-1", 2.00,
-                new com.sakshichavan.rtb.bidder.campaign.Targeting(null, java.util.Set.of("USA"), null));
+        Campaign usOnly = new Campaign("us-only", "cr-1", 2.00, new Targeting(null, Set.of("USA"), null));
         TargetingBidEngine engine = engineWith(usOnly);
 
-        assertTrue(engine.evaluate(requestWithFloor(0.10)).isEmpty());
+        assertTrue(engine.evaluate(request(0.10, AuctionType.FIRST_PRICE)).isEmpty());
     }
 }

@@ -13,17 +13,19 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * For each impression, picks the highest-paying matching campaign whose max bid clears the floor.
- * Pricing is deliberately naive (bids its full max); Step 3 replaces it with real auction pricing.
+ * For each impression, picks the highest-value matching campaign that clears the floor,
+ * then prices the bid for the request's auction type (truthful for second price, shaded for first price).
  */
 public final class TargetingBidEngine implements BidEngine {
 
     static final String SEAT = "rtb-platform";
 
     private final TargetingIndex index;
+    private final BidPricer pricer;
 
-    public TargetingBidEngine(TargetingIndex index) {
+    public TargetingBidEngine(TargetingIndex index, BidPricer pricer) {
         this.index = index;
+        this.pricer = pricer;
     }
 
     @Override
@@ -39,7 +41,8 @@ public final class TargetingBidEngine implements BidEngine {
                 }
             }
             if (best != null) {
-                bids.add(new Bid(request.id() + "-" + imp.id(), imp.id(), best.maxBidCpm(),
+                double price = pricer.price(best.maxBidCpm(), imp.bidFloor(), request.at());
+                bids.add(new Bid(request.id() + "-" + imp.id(), imp.id(), price,
                         best.id(), best.creativeId(), null));
             }
         }
