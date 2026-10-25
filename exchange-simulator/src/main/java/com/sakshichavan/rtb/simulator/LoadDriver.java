@@ -29,10 +29,21 @@ public final class LoadDriver implements AutoCloseable {
     private static final long MAX_LATENCY_MICROS = TimeUnit.SECONDS.toMicros(10);
 
     private final URI target;
+    private final Duration timeoutOverride;
     private final HttpClient client;
 
+    /** Enforces each request's tmax as its deadline, like a real exchange. */
     public LoadDriver(URI target) {
+        this(target, null);
+    }
+
+    /**
+     * @param timeoutOverride if non-null, used instead of each request's tmax. Useful for tests that
+     *                        check behavior unrelated to deadlines, and for benchmarking without cutoffs.
+     */
+    public LoadDriver(URI target, Duration timeoutOverride) {
         this.target = target;
+        this.timeoutOverride = timeoutOverride;
         this.client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(2))
@@ -61,8 +72,9 @@ public final class LoadDriver implements AutoCloseable {
             waitUntil(intendedStart);
 
             BidRequest request = generator.next();
+            Duration deadline = (timeoutOverride != null) ? timeoutOverride : Duration.ofMillis(request.tmax());
             HttpRequest httpRequest = HttpRequest.newBuilder(target)
-                    .timeout(Duration.ofMillis(request.tmax()))
+                    .timeout(deadline)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(OpenRtbJson.write(request)))
                     .build();
