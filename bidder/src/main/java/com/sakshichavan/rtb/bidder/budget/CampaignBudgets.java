@@ -7,10 +7,12 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.LongAdder;
 import java.util.function.LongSupplier;
 
 /**
@@ -18,6 +20,7 @@ import java.util.function.LongSupplier;
  * When a lease drops below the low-water mark, one thread refills it asynchronously from the shared
  * BudgetSource, so the refill usually lands before the lease runs dry.
  * Exhausted campaigns and failed refills back off for one second to avoid hammering the source.
+ * Counts granted and reserved micros per campaign so spend can be reconciled across a fleet.
  */
 public final class CampaignBudgets implements SpendGuard {
 
@@ -64,6 +67,9 @@ public final class CampaignBudgets implements SpendGuard {
             return false;
         }
         boolean reserved = slot.lease.tryReserve(micros);
+        if (reserved) {
+            slot.reservedMicros.add(micros);
+        }
         if (slot.lease.isBelow(lowWaterMicros)
                 && nanoClock.getAsLong() - slot.retryAfterNanos >= 0
                 && slot.lease.tryBeginRefill()) {
@@ -77,6 +83,22 @@ public final class CampaignBudgets implements SpendGuard {
         return (slot == null) ? 0 : slot.lease.remainingMicros();
     }
 
+    /** Snapshot of per-campaign accounting, sorted by campaign id. Exact when the bidder is idle. */
+    public Map<String, BudgetStats> stats() {
+        Map<String, BudgetStats> snapshot = new TreeMap<>();
+        slots.forEach((campaignId, slot) -> snapshot.put(campaignId, new BudgetStats(
+                slot.grantedMicros.sum(), slot.reservedMicros.sum(), slot.lease.remainingMicros())));
+        return snapshot;
+    }
+
+    public long chunkMicros() {
+        return chunkMicros;
+    }
+
+    public long lowWaterMicros() {
+        return lowWaterMicros;
+    }
+
     private CompletionStage<Void> refill(String campaignId, Slot slot) {
         CompletionStage<Long> granted;
         try {
@@ -86,7 +108,9 @@ public final class CampaignBudgets implements SpendGuard {
         }
         return granted.handle((amount, error) -> {
             long micros = (error == null && amount != null) ? amount : 0L;
-            if (micros == 0) {
+            if (micros > 0) {
+                slot.grantedMicros.add(micros);
+            } else {
                 slot.retryAfterNanos = nanoClock.getAsLong() + BACKOFF_NANOS;
             }
             slot.lease.completeRefill(micros);
@@ -96,6 +120,8 @@ public final class CampaignBudgets implements SpendGuard {
 
     private static final class Slot {
         final BudgetLease lease = new BudgetLease(0);
+        final LongAdder grantedMicros = new LongAdder();
+        final LongAdder reservedMicros = new LongAdder();
         volatile long retryAfterNanos;
 
         Slot(long nowNanos) {

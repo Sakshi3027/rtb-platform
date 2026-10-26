@@ -22,10 +22,11 @@ import io.netty.handler.codec.http.QueryStringDecoder;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.util.Optional;
+import java.util.function.Supplier;
 
 /**
- * Routes HTTP requests: POST /bid runs the bid engine, GET /health reports liveness.
- * Stateless, so one instance is shared by every connection (@Sharable).
+ * Routes HTTP requests: POST /bid runs the bid engine, GET /health reports liveness,
+ * GET /stats returns operational counters as JSON. Stateless, so one instance is shared (@Sharable).
  */
 @ChannelHandler.Sharable
 final class BidHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
@@ -33,9 +34,11 @@ final class BidHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
     private static final byte[] HEALTH_BODY = "ok".getBytes(StandardCharsets.UTF_8);
 
     private final BidEngine engine;
+    private final Supplier<Object> stats;
 
-    BidHandler(BidEngine engine) {
+    BidHandler(BidEngine engine, Supplier<Object> stats) {
         this.engine = engine;
+        this.stats = stats;
     }
 
     @Override
@@ -44,6 +47,9 @@ final class BidHandler extends SimpleChannelInboundHandler<FullHttpRequest> {
         FullHttpResponse response = switch (path) {
             case "/bid" -> handleBid(request);
             case "/health" -> body(HttpResponseStatus.OK, "text/plain", HEALTH_BODY);
+            case "/stats" -> HttpMethod.GET.equals(request.method())
+                    ? body(HttpResponseStatus.OK, "application/json", OpenRtbJson.write(stats.get()))
+                    : empty(HttpResponseStatus.METHOD_NOT_ALLOWED);
             default -> empty(HttpResponseStatus.NOT_FOUND);
         };
         send(ctx, request, response);

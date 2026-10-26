@@ -12,7 +12,9 @@ import io.netty.handler.codec.http.HttpObjectAggregator;
 import io.netty.handler.codec.http.HttpServerCodec;
 
 import java.net.InetSocketAddress;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * Netty HTTP server for the bidder.
@@ -30,7 +32,11 @@ public final class BidderServer implements AutoCloseable {
     private final Channel serverChannel;
 
     public BidderServer(int port, BidEngine engine) throws InterruptedException {
-        BidHandler handler = new BidHandler(engine);
+        this(port, engine, () -> Map.of());
+    }
+
+    public BidderServer(int port, BidEngine engine, Supplier<Object> stats) throws InterruptedException {
+        BidHandler handler = new BidHandler(engine, stats);
         try {
             ServerBootstrap bootstrap = new ServerBootstrap()
                     .group(bossGroup, workerGroup)

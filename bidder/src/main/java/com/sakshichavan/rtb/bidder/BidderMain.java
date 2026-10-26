@@ -16,6 +16,7 @@ import java.time.Clock;
 import java.time.Duration;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /** Starts the bidder. Configuration comes from environment variables (container-friendly). */
@@ -57,7 +58,10 @@ public final class BidderMain {
         FrequencyCapper frequencyCapper = new FrequencyCapper(maxCappedUsers, longestCapWindow, System::nanoTime);
 
         BidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
-        BidderServer server = new BidderServer(port, engine);
+        BidderServer server = new BidderServer(port, engine, () -> Map.of(
+                "leaseChunkMicros", budgets.chunkMicros(),
+                "lowWaterMicros", budgets.lowWaterMicros(),
+                "campaigns", budgets.stats()));
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();
             budgetSource.close();
