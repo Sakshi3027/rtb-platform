@@ -19,3 +19,9 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+
+  aerospike:
+    image: aerospike:ce-8.1.2.4
+    container_name: rtb-aerospike
+    ports:
+      - "3000:3000"
