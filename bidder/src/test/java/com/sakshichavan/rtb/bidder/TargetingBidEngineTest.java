@@ -4,6 +4,7 @@ import com.sakshichavan.rtb.bidder.budget.SpendGuard;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.Targeting;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
+import com.sakshichavan.rtb.bidder.frequency.FrequencyGuard;
 import com.sakshichavan.rtb.common.openrtb.AuctionType;
 import com.sakshichavan.rtb.common.openrtb.Banner;
 import com.sakshichavan.rtb.common.openrtb.Bid;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -31,8 +33,12 @@ class TargetingBidEngineTest {
         return new Campaign(id, "cr-" + id, maxBidCpm, 100.0, null);
     }
 
-    private static TargetingBidEngine engineWith(SpendGuard guard, Campaign... campaigns) {
-        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)), new BidPricer(0.5), guard);
+    private static TargetingBidEngine engineWith(SpendGuard spend, FrequencyGuard frequency, Campaign... campaigns) {
+        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)), new BidPricer(0.5), spend, frequency);
+    }
+
+    private static TargetingBidEngine engineWith(SpendGuard spend, Campaign... campaigns) {
+        return engineWith(spend, FrequencyGuard.UNLIMITED, campaigns);
     }
 
     private static Bid onlyBid(BidResponse response) {
@@ -116,5 +122,47 @@ class TargetingBidEngineTest {
         engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).orElseThrow();
 
         assertEquals(List.of(1_500L), reserved);
+    }
+
+    @Test
+    void fallsBackWhenTheUserIsFrequencyCappedOnTheBestCampaign() {
+        FrequencyGuard premiumIsCapped = new FrequencyGuard() {
+            @Override
+            public boolean tryAcquire(String userId, Campaign campaign) {
+                return !campaign.id().equals("premium");
+            }
+
+            @Override
+            public void release(String userId, Campaign campaign) {
+            }
+        };
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, premiumIsCapped,
+                campaign("cheap", 1.00), campaign("premium", 2.50));
+
+        BidResponse response = engine.evaluate(request(0.50, AuctionType.SECOND_PRICE)).orElseThrow();
+
+        assertEquals("cheap", onlyBid(response).adId());
+    }
+
+    @Test
+    void releasesTheFrequencySlotWhenBudgetRejects() {
+        AtomicInteger released = new AtomicInteger();
+        FrequencyGuard countingReleases = new FrequencyGuard() {
+            @Override
+            public boolean tryAcquire(String userId, Campaign campaign) {
+                return true;
+            }
+
+            @Override
+            public void release(String userId, Campaign campaign) {
+                released.incrementAndGet();
+            }
+        };
+        SpendGuard everyoneIsBroke = (campaignId, micros) -> false;
+        TargetingBidEngine engine = engineWith(everyoneIsBroke, countingReleases,
+                campaign("cheap", 1.00), campaign("premium", 2.50));
+
+        assertTrue(engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).isEmpty());
+        assertEquals(2, released.get());
     }
 }

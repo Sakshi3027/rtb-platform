@@ -1,8 +1,10 @@
 [
   {"id": "c-sports-us", "creativeId": "cr-sports-1", "maxBidCpm": 2.80, "dailyBudgetUsd": 40.00,
-   "targeting": {"sizes": [{"w": 300, "h": 250}, {"w": 728, "h": 90}], "countries": ["USA"], "categories": ["IAB17"]}},
+   "targeting": {"sizes": [{"w": 300, "h": 250}, {"w": 728, "h": 90}], "countries": ["USA"], "categories": ["IAB17"]},
+   "frequencyCap": {"maxImpressions": 5, "windowSeconds": 3600}},
   {"id": "c-news-global", "creativeId": "cr-news-1", "maxBidCpm": 1.90, "dailyBudgetUsd": 25.00,
-   "targeting": {"sizes": [{"w": 300, "h": 250}, {"w": 300, "h": 600}], "categories": ["IAB12"]}},
+   "targeting": {"sizes": [{"w": 300, "h": 250}, {"w": 300, "h": 600}], "categories": ["IAB12"]},
+   "frequencyCap": {"maxImpressions": 4, "windowSeconds": 3600}},
   {"id": "c-tech-us-gb", "creativeId": "cr-tech-1", "maxBidCpm": 2.20, "dailyBudgetUsd": 20.00,
    "targeting": {"sizes": [{"w": 728, "h": 90}, {"w": 160, "h": 600}], "countries": ["USA", "GBR"], "categories": ["IAB19"]}},
   {"id": "c-food-anywhere", "creativeId": "cr-food-1", "maxBidCpm": 1.20, "dailyBudgetUsd": 10.00,
@@ -16,7 +18,8 @@
   {"id": "c-mobile-network", "creativeId": "cr-mobile-1", "maxBidCpm": 0.90, "dailyBudgetUsd": 3.00,
    "targeting": {"sizes": [{"w": 320, "h": 50}]}},
   {"id": "c-brand-awareness", "creativeId": "cr-brand-1", "maxBidCpm": 1.50, "dailyBudgetUsd": 20.00,
-   "targeting": {"countries": ["USA", "CAN", "GBR"]}},
+   "targeting": {"countries": ["USA", "CAN", "GBR"]},
+   "frequencyCap": {"maxImpressions": 3, "windowSeconds": 3600}},
   {"id": "c-games-india", "creativeId": "cr-games-1", "maxBidCpm": 0.80, "dailyBudgetUsd": 3.00,
    "targeting": {"sizes": [{"w": 300, "h": 250}, {"w": 320, "h": 50}], "countries": ["IND"], "categories": ["IAB9"]}}
 ]

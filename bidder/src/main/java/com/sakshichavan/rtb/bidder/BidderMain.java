@@ -8,11 +8,15 @@ import com.sakshichavan.rtb.bidder.budget.RedisBudgetSource;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.CampaignLoader;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
+import com.sakshichavan.rtb.bidder.frequency.FrequencyCapper;
 import com.sakshichavan.rtb.common.money.Micros;
 
 import java.nio.file.Path;
 import java.time.Clock;
+import java.time.Duration;
+import java.util.Comparator;
 import java.util.List;
+import java.util.Objects;
 
 /** Starts the bidder. Configuration comes from environment variables (container-friendly). */
 public final class BidderMain {
@@ -27,6 +31,7 @@ public final class BidderMain {
                 Double.parseDouble(System.getenv().getOrDefault("LEASE_CHUNK_USD", "0.50")));
         String pacingMode = System.getenv().getOrDefault("PACING", "even");
         double pacingBurst = Double.parseDouble(System.getenv().getOrDefault("PACING_BURST", "0.02"));
+        long maxCappedUsers = Long.parseLong(System.getenv().getOrDefault("FREQ_CAP_MAX_USERS", "1000000"));
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
         String redisUri = System.getenv("REDIS_URI");
 
@@ -43,7 +48,15 @@ public final class BidderMain {
         CampaignBudgets budgets = new CampaignBudgets(budgetSource, leaseChunkMicros, leaseChunkMicros / 5, System::nanoTime);
         budgets.initialize(campaigns).toCompletableFuture().join();
 
-        BidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets);
+        Duration longestCapWindow = campaigns.stream()
+                .map(Campaign::frequencyCap)
+                .filter(Objects::nonNull)
+                .map(cap -> Duration.ofSeconds(cap.windowSeconds()))
+                .max(Comparator.naturalOrder())
+                .orElse(Duration.ofHours(1));
+        FrequencyCapper frequencyCapper = new FrequencyCapper(maxCappedUsers, longestCapWindow, System::nanoTime);
+
+        BidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
         BidderServer server = new BidderServer(port, engine);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();

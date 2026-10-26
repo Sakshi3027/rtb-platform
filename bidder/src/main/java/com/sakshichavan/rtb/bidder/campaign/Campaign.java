@@ -1,12 +1,22 @@
 package com.sakshichavan.rtb.bidder.campaign;
 
+import com.fasterxml.jackson.annotation.JsonCreator;
+
 import java.util.Objects;
 
 /**
- * An advertiser campaign: what to show (creative), its max CPM, its daily budget in dollars, and who to target.
+ * An advertiser campaign: creative, max CPM, daily budget in dollars, targeting,
+ * and an optional per-user frequency cap (null means uncapped).
  */
-public record Campaign(String id, String creativeId, double maxBidCpm, double dailyBudgetUsd, Targeting targeting) {
+public record Campaign(
+        String id,
+        String creativeId,
+        double maxBidCpm,
+        double dailyBudgetUsd,
+        Targeting targeting,
+        FrequencyCap frequencyCap) {
 
+    @JsonCreator
     public Campaign {
         Objects.requireNonNull(id, "campaign.id is required");
         Objects.requireNonNull(creativeId, "campaign.creativeId is required");
@@ -19,5 +29,10 @@ public record Campaign(String id, String creativeId, double maxBidCpm, double da
         if (targeting == null) {
             targeting = Targeting.ANY;
         }
+    }
+
+    /** Convenience constructor for an uncapped campaign. */
+    public Campaign(String id, String creativeId, double maxBidCpm, double dailyBudgetUsd, Targeting targeting) {
+        this(id, creativeId, maxBidCpm, dailyBudgetUsd, targeting, null);
     }
 }

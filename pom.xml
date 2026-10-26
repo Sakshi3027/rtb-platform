@@ -23,6 +23,7 @@
         <hdrhistogram.version>2.2.2</hdrhistogram.version>
         <netty.version>4.1.115.Final</netty.version>
         <lettuce.version>6.5.1.RELEASE</lettuce.version>
+        <caffeine.version>3.1.8</caffeine.version>
         <testcontainers.version>1.20.4</testcontainers.version>
     </properties>
 
@@ -42,6 +43,11 @@
                 <groupId>io.lettuce</groupId>
                 <artifactId>lettuce-core</artifactId>
                 <version>${lettuce.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.github.ben-manes.caffeine</groupId>
+                <artifactId>caffeine</artifactId>
+                <version>${caffeine.version}</version>
             </dependency>
             <dependency>
                 <groupId>org.junit</groupId>
