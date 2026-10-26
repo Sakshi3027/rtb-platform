@@ -18,8 +18,8 @@ import java.util.function.Supplier;
 
 /**
  * Netty HTTP server for the bidder.
- * Boss group: 1 thread accepting connections. Worker group: event loop threads (2 per core by default)
- * that handle all reads, writes, and bid evaluation without blocking.
+ * Boss group: 1 thread accepting connections. Worker group: I/O event loop threads (2 per core by default,
+ * or ioThreads if set) that handle reads, writes, and request routing without blocking.
  */
 public final class BidderServer implements AutoCloseable {
 
@@ -28,24 +28,32 @@ public final class BidderServer implements AutoCloseable {
     private static final long SHUTDOWN_TIMEOUT_MILLIS = 5_000;
 
     private final EventLoopGroup bossGroup = new NioEventLoopGroup(1);
-    private final EventLoopGroup workerGroup = new NioEventLoopGroup();
+    private final EventLoopGroup workerGroup;
     private final Channel serverChannel;
 
     public BidderServer(int port, BidEngine engine) throws InterruptedException {
-        this(port, AsyncBidEngine.of(engine), () -> Map.of());
+        this(port, 0, AsyncBidEngine.of(engine), () -> Map.of());
     }
 
     public BidderServer(int port, BidEngine engine, Supplier<Object> stats) throws InterruptedException {
-        this(port, AsyncBidEngine.of(engine), stats);
+        this(port, 0, AsyncBidEngine.of(engine), stats);
     }
 
-    /** For engines that do I/O, such as BidPipeline. */
+    /** For engines that do I/O, such as BidPipeline. Uses Netty's default I/O thread count. */
     public static BidderServer withAsyncEngine(int port, AsyncBidEngine engine, Supplier<Object> stats)
             throws InterruptedException {
-        return new BidderServer(port, engine, stats);
+        return new BidderServer(port, 0, engine, stats);
     }
 
-    private BidderServer(int port, AsyncBidEngine engine, Supplier<Object> stats) throws InterruptedException {
+    /** @param ioThreads number of I/O event loop threads; 0 means Netty's default (2 per core) */
+    public static BidderServer withAsyncEngine(int port, int ioThreads, AsyncBidEngine engine, Supplier<Object> stats)
+            throws InterruptedException {
+        return new BidderServer(port, ioThreads, engine, stats);
+    }
+
+    private BidderServer(int port, int ioThreads, AsyncBidEngine engine, Supplier<Object> stats)
+            throws InterruptedException {
+        this.workerGroup = new NioEventLoopGroup(ioThreads);
         BidHandler handler = new BidHandler(engine, stats);
         try {
             ServerBootstrap bootstrap = new ServerBootstrap()

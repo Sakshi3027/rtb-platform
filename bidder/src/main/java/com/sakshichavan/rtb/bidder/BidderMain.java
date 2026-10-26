@@ -12,12 +12,14 @@ import com.sakshichavan.rtb.bidder.frequency.FrequencyCapper;
 import com.sakshichavan.rtb.bidder.profile.AerospikeProfileStore;
 import com.sakshichavan.rtb.bidder.profile.ProfileStore;
 import com.sakshichavan.rtb.bidder.profile.SyntheticProfiles;
+import com.sakshichavan.rtb.bidder.resilience.AdmissionController;
 import com.sakshichavan.rtb.common.money.Micros;
 
 import java.nio.file.Path;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -28,16 +30,26 @@ public final class BidderMain {
     private BidderMain() {
     }
 
+    private static String env(String name, String defaultValue) {
+        return System.getenv().getOrDefault(name, defaultValue);
+    }
+
     public static void main(String[] args) throws InterruptedException {
-        int port = Integer.parseInt(System.getenv().getOrDefault("BIDDER_PORT", "8080"));
-        double shadingFactor = Double.parseDouble(System.getenv().getOrDefault("BID_SHADING_FACTOR", "0.5"));
-        long leaseChunkMicros = Micros.fromDollars(
-                Double.parseDouble(System.getenv().getOrDefault("LEASE_CHUNK_USD", "0.50")));
-        String pacingMode = System.getenv().getOrDefault("PACING", "even");
-        double pacingBurst = Double.parseDouble(System.getenv().getOrDefault("PACING_BURST", "0.02"));
-        long maxCappedUsers = Long.parseLong(System.getenv().getOrDefault("FREQ_CAP_MAX_USERS", "1000000"));
-        long profileTimeoutMillis = Long.parseLong(System.getenv().getOrDefault("PROFILE_TIMEOUT_MS", "5"));
-        String profileMode = System.getenv().getOrDefault("PROFILE_STORE", "synthetic");
+        int port = Integer.parseInt(env("BIDDER_PORT", "8080"));
+        double shadingFactor = Double.parseDouble(env("BID_SHADING_FACTOR", "0.5"));
+        long leaseChunkMicros = Micros.fromDollars(Double.parseDouble(env("LEASE_CHUNK_USD", "0.50")));
+        String pacingMode = env("PACING", "even");
+        double pacingBurst = Double.parseDouble(env("PACING_BURST", "0.02"));
+        long maxCappedUsers = Long.parseLong(env("FREQ_CAP_MAX_USERS", "1000000"));
+        long profileTimeoutMillis = Long.parseLong(env("PROFILE_TIMEOUT_MS", "5"));
+        String profileMode = env("PROFILE_STORE", "synthetic");
+        boolean shedding = !"off".equals(env("SHEDDING", "on"));
+        int ioThreads = Integer.parseInt(env("BIDDER_IO_THREADS", "0"));
+        int workerThreads = Integer.parseInt(env("WORKER_THREADS",
+                String.valueOf(Runtime.getRuntime().availableProcessors())));
+        int queueCapacity = Integer.parseInt(env("QUEUE_CAPACITY", "2000"));
+        long maxQueueDelayMillis = Long.parseLong(env("MAX_QUEUE_DELAY_MS", "20"));
+        long simulatedWorkMicros = Long.parseLong(env("SIMULATED_WORK_MICROS", "0"));
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
         String redisUri = System.getenv("REDIS_URI");
 
@@ -64,31 +76,49 @@ public final class BidderMain {
 
         ProfileStore profileStore = "aerospike".equals(profileMode)
                 ? AerospikeProfileStore.connectWithRetry(
-                        System.getenv().getOrDefault("AEROSPIKE_HOST", "localhost"),
-                        Integer.parseInt(System.getenv().getOrDefault("AEROSPIKE_PORT", "3000")),
-                        System.getenv().getOrDefault("AEROSPIKE_NAMESPACE", "test"),
+                        env("AEROSPIKE_HOST", "localhost"),
+                        Integer.parseInt(env("AEROSPIKE_PORT", "3000")),
+                        env("AEROSPIKE_NAMESPACE", "test"),
                         (int) profileTimeoutMillis + 2, Duration.ofSeconds(30))
                 : SyntheticProfiles.store();
         TargetingBidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
         BidPipeline pipeline = new BidPipeline(profileStore, engine, profileTimeoutMillis);
 
-        BidderServer server = BidderServer.withAsyncEngine(port, pipeline, () -> Map.of(
-                "leaseChunkMicros", budgets.chunkMicros(),
-                "lowWaterMicros", budgets.lowWaterMicros(),
-                "campaigns", budgets.stats(),
-                "profiles", pipeline.stats()));
+        AsyncBidEngine work = (simulatedWorkMicros > 0) ? SimulatedWork.wrap(pipeline, simulatedWorkMicros) : pipeline;
+        AdmissionController admission = shedding
+                ? new AdmissionController(work, workerThreads, queueCapacity, Duration.ofMillis(maxQueueDelayMillis))
+                : null;
+        AsyncBidEngine frontDoor = shedding ? admission : work;
+
+        BidderServer server = BidderServer.withAsyncEngine(port, ioThreads, frontDoor, () -> {
+            Map<String, Object> stats = new LinkedHashMap<>();
+            stats.put("leaseChunkMicros", budgets.chunkMicros());
+            stats.put("lowWaterMicros", budgets.lowWaterMicros());
+            stats.put("campaigns", budgets.stats());
+            stats.put("profiles", pipeline.stats());
+            if (admission != null) {
+                stats.put("admission", admission.stats());
+            }
+            return stats;
+        });
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();
+            if (admission != null) {
+                admission.close();
+            }
             pipeline.close();
             profileStore.close();
             budgetSource.close();
         }));
 
-        System.out.printf("bidder listening on port %d with %d campaigns, shading %.2f, pacing %s, "
-                        + "profiles: %s (timeout %dms), budgets: %s%n",
-                server.port(), index.size(), shadingFactor,
+        System.out.printf("bidder listening on port %d with %d campaigns, pacing %s, profiles: %s (timeout %dms), "
+                        + "budgets: %s, shedding: %s, io threads: %s%s%n",
+                server.port(), index.size(),
                 "none".equals(pacingMode) ? "none" : "even (burst " + pacingBurst + ")",
                 profileMode, profileTimeoutMillis,
-                (redisUri == null) ? "in-memory (single instance only)" : "redis " + redisUri);
+                (redisUri == null) ? "in-memory" : "redis",
+                shedding ? "on (" + workerThreads + " workers, max queue delay " + maxQueueDelayMillis + "ms)" : "off",
+                (ioThreads == 0) ? "default" : String.valueOf(ioThreads),
+                (simulatedWorkMicros > 0) ? ", simulated work " + simulatedWorkMicros + "us/bid" : "");
     }
 }
