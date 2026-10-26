@@ -19,7 +19,7 @@ class TargetingIndexTest {
     private static final Banner LEADERBOARD = new Banner(728, 90);
 
     private static Campaign campaign(String id, Set<Banner> sizes, Set<String> countries, Set<String> categories) {
-        return new Campaign(id, "cr-" + id, 1.0, new Targeting(sizes, countries, categories));
+        return new Campaign(id, "cr-" + id, 1.0, 100.0, new Targeting(sizes, countries, categories));
     }
 
     private static BidRequest request(Banner size, String country, List<String> categories) {

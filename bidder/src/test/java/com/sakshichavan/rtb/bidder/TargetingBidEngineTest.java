@@ -1,5 +1,6 @@
 package com.sakshichavan.rtb.bidder;
 
+import com.sakshichavan.rtb.bidder.budget.SpendGuard;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.Targeting;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
@@ -11,6 +12,7 @@ import com.sakshichavan.rtb.common.openrtb.BidResponse;
 import com.sakshichavan.rtb.common.openrtb.Imp;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -25,8 +27,12 @@ class TargetingBidEngineTest {
         return new BidRequest("req-1", List.of(imp), null, null, null, 100, auctionType);
     }
 
-    private static TargetingBidEngine engineWith(Campaign... campaigns) {
-        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)), new BidPricer(0.5));
+    private static Campaign campaign(String id, double maxBidCpm) {
+        return new Campaign(id, "cr-" + id, maxBidCpm, 100.0, null);
+    }
+
+    private static TargetingBidEngine engineWith(SpendGuard guard, Campaign... campaigns) {
+        return new TargetingBidEngine(new TargetingIndex(List.of(campaigns)), new BidPricer(0.5), guard);
     }
 
     private static Bid onlyBid(BidResponse response) {
@@ -35,9 +41,7 @@ class TargetingBidEngineTest {
 
     @Test
     void secondPriceBidsHighestValueCampaignAtFullValue() {
-        TargetingBidEngine engine = engineWith(
-                new Campaign("cheap", "cr-1", 1.00, null),
-                new Campaign("premium", "cr-2", 2.50, null));
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, campaign("cheap", 1.00), campaign("premium", 2.50));
 
         BidResponse response = engine.evaluate(request(0.50, AuctionType.SECOND_PRICE)).orElseThrow();
 
@@ -47,7 +51,7 @@ class TargetingBidEngineTest {
 
     @Test
     void firstPriceShadesTheBid() {
-        TargetingBidEngine engine = engineWith(new Campaign("premium", "cr-2", 2.50, null));
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, campaign("premium", 2.50));
 
         BidResponse response = engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).orElseThrow();
 
@@ -56,9 +60,7 @@ class TargetingBidEngineTest {
 
     @Test
     void skipsCampaignsThatCannotClearTheFloor() {
-        TargetingBidEngine engine = engineWith(
-                new Campaign("cheap", "cr-1", 1.00, null),
-                new Campaign("premium", "cr-2", 2.50, null));
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, campaign("cheap", 1.00), campaign("premium", 2.50));
 
         Optional<BidResponse> response = engine.evaluate(request(3.00, AuctionType.FIRST_PRICE));
 
@@ -67,7 +69,7 @@ class TargetingBidEngineTest {
 
     @Test
     void producesResponsesTheExchangeAccepts() {
-        TargetingBidEngine engine = engineWith(new Campaign("only", "cr-1", 1.50, null));
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, campaign("only", 1.50));
         BidRequest request = request(0.75, AuctionType.FIRST_PRICE);
 
         BidResponse response = engine.evaluate(request).orElseThrow();
@@ -78,9 +80,41 @@ class TargetingBidEngineTest {
 
     @Test
     void noBidWhenNoCampaignTargetsTheRequest() {
-        Campaign usOnly = new Campaign("us-only", "cr-1", 2.00, new Targeting(null, Set.of("USA"), null));
-        TargetingBidEngine engine = engineWith(usOnly);
+        Campaign usOnly = new Campaign("us-only", "cr-1", 2.00, 100.0, new Targeting(null, Set.of("USA"), null));
+        TargetingBidEngine engine = engineWith(SpendGuard.UNLIMITED, usOnly);
 
         assertTrue(engine.evaluate(request(0.10, AuctionType.FIRST_PRICE)).isEmpty());
+    }
+
+    @Test
+    void fallsBackToNextBestCampaignWhenBudgetIsExhausted() {
+        SpendGuard premiumIsBroke = (campaignId, micros) -> !campaignId.equals("premium");
+        TargetingBidEngine engine = engineWith(premiumIsBroke, campaign("cheap", 1.00), campaign("premium", 2.50));
+
+        BidResponse response = engine.evaluate(request(0.50, AuctionType.SECOND_PRICE)).orElseThrow();
+
+        assertEquals("cheap", onlyBid(response).adId());
+    }
+
+    @Test
+    void noBidWhenEveryCampaignIsOutOfBudget() {
+        SpendGuard everyoneIsBroke = (campaignId, micros) -> false;
+        TargetingBidEngine engine = engineWith(everyoneIsBroke, campaign("cheap", 1.00), campaign("premium", 2.50));
+
+        assertTrue(engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).isEmpty());
+    }
+
+    @Test
+    void reservesThePerImpressionCostNotTheCpm() {
+        List<Long> reserved = new ArrayList<>();
+        SpendGuard recording = (campaignId, micros) -> {
+            reserved.add(micros);
+            return true;
+        };
+        TargetingBidEngine engine = engineWith(recording, campaign("premium", 2.50));
+
+        engine.evaluate(request(0.50, AuctionType.FIRST_PRICE)).orElseThrow();
+
+        assertEquals(List.of(1_500L), reserved);
     }
 }
