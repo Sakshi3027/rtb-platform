@@ -4,6 +4,7 @@ import com.sakshichavan.rtb.bidder.budget.SpendGuard;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
 import com.sakshichavan.rtb.bidder.frequency.FrequencyGuard;
+import com.sakshichavan.rtb.bidder.profile.UserProfile;
 import com.sakshichavan.rtb.common.money.Micros;
 import com.sakshichavan.rtb.common.openrtb.Bid;
 import com.sakshichavan.rtb.common.openrtb.BidRequest;
@@ -17,9 +18,9 @@ import java.util.List;
 import java.util.Optional;
 
 /**
- * For each impression: find matching campaigns that clear the floor and try them from highest value down.
- * A campaign bids only if the user is under its frequency cap AND its budget covers the impression cost.
- * If the budget check fails after a frequency slot was taken, the slot is released.
+ * The pure, synchronous decision core: no I/O. For each impression, find matching campaigns (including
+ * audience segments from the user's profile) that clear the floor, try them from highest value down, and
+ * bid with the first one under its frequency cap whose budget covers the impression cost.
  */
 public final class TargetingBidEngine implements BidEngine {
 
@@ -43,12 +44,16 @@ public final class TargetingBidEngine implements BidEngine {
 
     @Override
     public Optional<BidResponse> evaluate(BidRequest request) {
+        return evaluate(request, UserProfile.UNKNOWN);
+    }
+
+    public Optional<BidResponse> evaluate(BidRequest request, UserProfile profile) {
         String userId = (request.user() == null) ? null : request.user().id();
         List<Bid> bids = new ArrayList<>(request.imp().size());
 
         for (Imp imp : request.imp()) {
             List<Campaign> eligible = new ArrayList<>();
-            for (Campaign campaign : index.match(request, imp)) {
+            for (Campaign campaign : index.match(request, imp, profile.segments())) {
                 if (campaign.maxBidCpm() >= imp.bidFloor()) {
                     eligible.add(campaign);
                 }

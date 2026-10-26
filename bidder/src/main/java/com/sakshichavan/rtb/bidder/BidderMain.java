@@ -9,6 +9,8 @@ import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.CampaignLoader;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
 import com.sakshichavan.rtb.bidder.frequency.FrequencyCapper;
+import com.sakshichavan.rtb.bidder.profile.ProfileStore;
+import com.sakshichavan.rtb.bidder.profile.SyntheticProfiles;
 import com.sakshichavan.rtb.common.money.Micros;
 
 import java.nio.file.Path;
@@ -33,6 +35,7 @@ public final class BidderMain {
         String pacingMode = System.getenv().getOrDefault("PACING", "even");
         double pacingBurst = Double.parseDouble(System.getenv().getOrDefault("PACING_BURST", "0.02"));
         long maxCappedUsers = Long.parseLong(System.getenv().getOrDefault("FREQ_CAP_MAX_USERS", "1000000"));
+        long profileTimeoutMillis = Long.parseLong(System.getenv().getOrDefault("PROFILE_TIMEOUT_MS", "5"));
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
         String redisUri = System.getenv("REDIS_URI");
 
@@ -57,19 +60,25 @@ public final class BidderMain {
                 .orElse(Duration.ofHours(1));
         FrequencyCapper frequencyCapper = new FrequencyCapper(maxCappedUsers, longestCapWindow, System::nanoTime);
 
-        BidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
-        BidderServer server = new BidderServer(port, engine, () -> Map.of(
+        ProfileStore profileStore = SyntheticProfiles.store();
+        TargetingBidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
+        BidPipeline pipeline = new BidPipeline(profileStore, engine, profileTimeoutMillis);
+
+        BidderServer server = BidderServer.withAsyncEngine(port, pipeline, () -> Map.of(
                 "leaseChunkMicros", budgets.chunkMicros(),
                 "lowWaterMicros", budgets.lowWaterMicros(),
                 "campaigns", budgets.stats()));
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();
+            profileStore.close();
             budgetSource.close();
         }));
 
-        System.out.printf("bidder listening on port %d with %d campaigns, shading %.2f, pacing %s, budgets: %s%n",
+        System.out.printf("bidder listening on port %d with %d campaigns, shading %.2f, pacing %s, "
+                        + "profiles: synthetic (timeout %dms), budgets: %s%n",
                 server.port(), index.size(), shadingFactor,
                 "none".equals(pacingMode) ? "none" : "even (burst " + pacingBurst + ")",
+                profileTimeoutMillis,
                 (redisUri == null) ? "in-memory (single instance only)" : "redis " + redisUri);
     }
 }

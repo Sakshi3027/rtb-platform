@@ -32,10 +32,20 @@ public final class BidderServer implements AutoCloseable {
     private final Channel serverChannel;
 
     public BidderServer(int port, BidEngine engine) throws InterruptedException {
-        this(port, engine, () -> Map.of());
+        this(port, AsyncBidEngine.of(engine), () -> Map.of());
     }
 
     public BidderServer(int port, BidEngine engine, Supplier<Object> stats) throws InterruptedException {
+        this(port, AsyncBidEngine.of(engine), stats);
+    }
+
+    /** For engines that do I/O, such as BidPipeline. */
+    public static BidderServer withAsyncEngine(int port, AsyncBidEngine engine, Supplier<Object> stats)
+            throws InterruptedException {
+        return new BidderServer(port, engine, stats);
+    }
+
+    private BidderServer(int port, AsyncBidEngine engine, Supplier<Object> stats) throws InterruptedException {
         BidHandler handler = new BidHandler(engine, stats);
         try {
             ServerBootstrap bootstrap = new ServerBootstrap()
