@@ -2,13 +2,16 @@ package com.sakshichavan.rtb.simulator;
 
 import java.net.URI;
 import java.time.Duration;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 
 /**
  * Command-line entry point.
- *   run  : drive open-loop load at a bidder and print a latency report
+ *   run  : drive open-loop load at one or more bidders and print a latency and frequency report
  *   stub : start the stub bidder and keep it running until Ctrl+C
  */
 public final class SimulatorMain {
@@ -33,23 +36,29 @@ public final class SimulatorMain {
     }
 
     private static void runLoad(Map<String, String> flags) throws InterruptedException {
-        URI target = URI.create(flags.getOrDefault("target", "http://127.0.0.1:8080/bid"));
+        List<URI> targets = flags.containsKey("targets")
+                ? Arrays.stream(flags.get("targets").split(",")).map(String::trim).map(URI::create).toList()
+                : List.of(URI.create(flags.getOrDefault("target", "http://127.0.0.1:8080/bid")));
+        String routing = flags.getOrDefault("routing", "round-robin");
         int qps = intFlag(flags, "qps", 1_000);
         int durationSeconds = intFlag(flags, "duration", 10);
         int warmupSeconds = intFlag(flags, "warmup", 3);
         long seed = Long.parseLong(flags.getOrDefault("seed", "42"));
         int users = intFlag(flags, "users", 100_000);
+        Map<String, Integer> caps = parseCaps(flags.get("caps"));
 
         WeightedSampler<Integer> userSampler = TrafficGenerator.userSampler(users);
+        Router router = Router.of(routing, targets);
 
-        try (LoadDriver driver = new LoadDriver(target)) {
+        try (LoadDriver driver = new LoadDriver(router, null)) {
             if (warmupSeconds > 0) {
                 System.out.printf("warming up: %ds at %d req/s (results discarded)%n", warmupSeconds, qps);
                 driver.run(new TrafficGenerator(seed + 1, 1, userSampler), qps, Duration.ofSeconds(warmupSeconds));
             }
-            System.out.printf("measuring: %ds at %d req/s against %s%n", durationSeconds, qps, target);
+            System.out.printf("measuring: %ds at %d req/s, routing %s across %d target(s)%n",
+                    durationSeconds, qps, routing, targets.size());
             LoadReport report = driver.run(
-                    new TrafficGenerator(seed, 0, userSampler), qps, Duration.ofSeconds(durationSeconds));
+                    new TrafficGenerator(seed, 0, userSampler), qps, Duration.ofSeconds(durationSeconds), caps);
             System.out.println(report.summary());
         }
     }
@@ -80,6 +89,22 @@ public final class SimulatorMain {
         return flags;
     }
 
+    /** Parses "campaignA=3,campaignB=5" into an ordered map. Null or blank means audit nothing. */
+    static Map<String, Integer> parseCaps(String spec) {
+        Map<String, Integer> caps = new LinkedHashMap<>();
+        if (spec == null || spec.isBlank()) {
+            return caps;
+        }
+        for (String entry : spec.split(",")) {
+            String[] parts = entry.trim().split("=");
+            if (parts.length != 2) {
+                throw new IllegalArgumentException("expected campaign=cap, got: " + entry);
+            }
+            caps.put(parts[0].trim(), Integer.parseInt(parts[1].trim()));
+        }
+        return caps;
+    }
+
     private static int intFlag(Map<String, String> flags, String name, int defaultValue) {
         return Integer.parseInt(flags.getOrDefault(name, String.valueOf(defaultValue)));
     }
@@ -87,7 +112,9 @@ public final class SimulatorMain {
     private static void printUsage() {
         System.err.println("""
                 usage:
-                  run  --target URL --qps N --duration SECONDS --warmup SECONDS --seed N --users N
+                  run  --target URL | --targets URL1,URL2,...  --routing round-robin|user-hash
+                       --qps N --duration SECONDS --warmup SECONDS --seed N --users N
+                       --caps campaignA=3,campaignB=5
                   stub --port N --delay-ms N --bid-rate 0.0-1.0""");
     }
 }

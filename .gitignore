@@ -16,3 +16,4 @@ target/
 # Secrets
 .env
 *.log.*
+logs/

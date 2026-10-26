@@ -6,6 +6,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SimulatorMainTest {
 
@@ -22,5 +23,12 @@ class SimulatorMainTest {
     void rejectsFlagWithoutValue() {
         assertThrows(IllegalArgumentException.class,
                 () -> SimulatorMain.parseFlags(new String[] {"run", "--qps"}));
+    }
+
+    @Test
+    void parsesFrequencyCapSpec() {
+        assertEquals(Map.of("c-a", 3, "c-b", 5), SimulatorMain.parseCaps("c-a=3, c-b=5"));
+        assertTrue(SimulatorMain.parseCaps(null).isEmpty());
+        assertThrows(IllegalArgumentException.class, () -> SimulatorMain.parseCaps("c-a:3"));
     }
 }

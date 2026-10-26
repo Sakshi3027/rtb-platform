@@ -1,7 +1,10 @@
 package com.sakshichavan.rtb.simulator;
 
+import com.sakshichavan.rtb.common.openrtb.Bid;
 import com.sakshichavan.rtb.common.openrtb.BidRequest;
+import com.sakshichavan.rtb.common.openrtb.BidResponse;
 import com.sakshichavan.rtb.common.openrtb.OpenRtbJson;
+import com.sakshichavan.rtb.common.openrtb.SeatBid;
 import org.HdrHistogram.ConcurrentHistogram;
 import org.HdrHistogram.Histogram;
 
@@ -12,6 +15,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
 import java.time.Duration;
+import java.util.Map;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -20,29 +24,34 @@ import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
 /**
- * Open-loop load driver: sends requests on a fixed schedule regardless of how the bidder
- * is responding. Records response time (from the scheduled send, avoiding coordinated omission)
- * and service time (from the actual send) so delays can be attributed to sender or bidder.
+ * Open-loop load driver: sends requests on a fixed schedule regardless of how the bidders respond.
+ * A Router picks the bidder for each request, like the load balancer in front of a fleet.
+ * Records response time (from the scheduled send, avoiding coordinated omission), service time
+ * (from the actual send), and per-user frequency ground truth for audited campaigns.
  */
 public final class LoadDriver implements AutoCloseable {
 
     private static final long MAX_LATENCY_MICROS = TimeUnit.SECONDS.toMicros(10);
 
-    private final URI target;
+    private final Router router;
     private final Duration timeoutOverride;
     private final HttpClient client;
 
-    /** Enforces each request's tmax as its deadline, like a real exchange. */
+    /** Single bidder; enforces each request's tmax as its deadline, like a real exchange. */
     public LoadDriver(URI target) {
-        this(target, null);
+        this(Router.single(target), null);
+    }
+
+    public LoadDriver(URI target, Duration timeoutOverride) {
+        this(Router.single(target), timeoutOverride);
     }
 
     /**
      * @param timeoutOverride if non-null, used instead of each request's tmax. Useful for tests that
      *                        check behavior unrelated to deadlines, and for benchmarking without cutoffs.
      */
-    public LoadDriver(URI target, Duration timeoutOverride) {
-        this.target = target;
+    public LoadDriver(Router router, Duration timeoutOverride) {
+        this.router = router;
         this.timeoutOverride = timeoutOverride;
         this.client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
@@ -52,6 +61,12 @@ public final class LoadDriver implements AutoCloseable {
     }
 
     public LoadReport run(TrafficGenerator generator, int qps, Duration duration) throws InterruptedException {
+        return run(generator, qps, duration, Map.of());
+    }
+
+    /** @param capsToAudit campaign id to frequency cap; these campaigns get per-user ground truth in the report */
+    public LoadReport run(TrafficGenerator generator, int qps, Duration duration, Map<String, Integer> capsToAudit)
+            throws InterruptedException {
         if (qps <= 0) {
             throw new IllegalArgumentException("qps must be positive: " + qps);
         }
@@ -73,7 +88,7 @@ public final class LoadDriver implements AutoCloseable {
 
             BidRequest request = generator.next();
             Duration deadline = (timeoutOverride != null) ? timeoutOverride : Duration.ofMillis(request.tmax());
-            HttpRequest httpRequest = HttpRequest.newBuilder(target)
+            HttpRequest httpRequest = HttpRequest.newBuilder(router.route(request))
                     .timeout(deadline)
                     .header("Content-Type", "application/json")
                     .POST(HttpRequest.BodyPublishers.ofByteArray(OpenRtbJson.write(request)))
@@ -93,7 +108,7 @@ public final class LoadDriver implements AutoCloseable {
 
         completed.await(30, TimeUnit.SECONDS);
         return outcomes.toReport(totalRequests, totalRequests / sendSeconds,
-                LatencySummary.from(responseTime), LatencySummary.from(serviceTime));
+                LatencySummary.from(responseTime), LatencySummary.from(serviceTime), capsToAudit);
     }
 
     private static void record(Histogram histogram, long elapsedNanos) {
@@ -112,13 +127,14 @@ public final class LoadDriver implements AutoCloseable {
         client.close();
     }
 
-    /** Thread-safe outcome counters. LongAdder avoids contention when many threads increment at once. */
+    /** Thread-safe outcome counters plus the frequency audit. LongAdder avoids contention across threads. */
     private static final class Outcomes {
         private final LongAdder bids = new LongAdder();
         private final LongAdder noBids = new LongAdder();
         private final LongAdder invalid = new LongAdder();
         private final LongAdder timeouts = new LongAdder();
         private final LongAdder errors = new LongAdder();
+        private final FrequencyAudit audit = new FrequencyAudit();
 
         void record(BidRequest request, HttpResponse<byte[]> response, Throwable error) {
             if (error != null) {
@@ -135,29 +151,47 @@ public final class LoadDriver implements AutoCloseable {
             switch (response.statusCode()) {
                 case 204 -> noBids.increment();
                 case 200 -> {
-                    if (isValidBid(request, response.body())) {
-                        bids.increment();
-                    } else {
+                    BidResponse bidResponse = parseValid(request, response.body());
+                    if (bidResponse == null) {
                         invalid.increment();
+                    } else {
+                        bids.increment();
+                        auditExposures(request, bidResponse);
                     }
                 }
                 default -> errors.increment();
             }
         }
 
-        private static boolean isValidBid(BidRequest request, byte[] body) {
+        /** Parses the response and returns it only if the exchange would accept it; otherwise null. */
+        private static BidResponse parseValid(BidRequest request, byte[] body) {
             try {
-                return OpenRtbJson.readResponse(body).isValidFor(request);
+                BidResponse parsed = OpenRtbJson.readResponse(body);
+                return parsed.isValidFor(request) ? parsed : null;
             } catch (UncheckedIOException e) {
-                return false;
+                return null;
             }
         }
 
-        LoadReport toReport(long requests, double sendRate, LatencySummary responseTime, LatencySummary serviceTime) {
+        private void auditExposures(BidRequest request, BidResponse response) {
+            if (request.user() == null || request.user().id() == null) {
+                return;
+            }
+            for (SeatBid seat : response.seatBid()) {
+                for (Bid bid : seat.bid()) {
+                    if (bid.adId() != null) {
+                        audit.record(request.user().id(), bid.adId());
+                    }
+                }
+            }
+        }
+
+        LoadReport toReport(long requests, double sendRate, LatencySummary responseTime,
+                            LatencySummary serviceTime, Map<String, Integer> capsToAudit) {
             return new LoadReport(
                     requests,
                     bids.sum(), noBids.sum(), invalid.sum(), timeouts.sum(), errors.sum(),
-                    sendRate, responseTime, serviceTime);
+                    sendRate, responseTime, serviceTime, audit.summarize(capsToAudit));
         }
     }
 }
