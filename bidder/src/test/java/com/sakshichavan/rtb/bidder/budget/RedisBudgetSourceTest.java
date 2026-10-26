@@ -28,8 +28,8 @@ class RedisBudgetSourceTest extends BudgetSourceContract {
     }
 
     @Override
-    protected BudgetSource newSource() {
-        return new RedisBudgetSource(redisUri(), Clock.systemUTC());
+    protected BudgetSource newSource(Clock clock, PacingPolicy pacing) {
+        return new RedisBudgetSource(redisUri(), clock, pacing);
     }
 
     @Test
