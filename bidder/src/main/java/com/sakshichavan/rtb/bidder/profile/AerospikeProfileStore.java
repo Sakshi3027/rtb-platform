@@ -108,7 +108,7 @@ public final class AerospikeProfileStore implements ProfileStore {
 
                 @Override
                 public void onFailure(AerospikeException error) {
-                    result.completeExceptionally(error);
+                    result.completeExceptionally(error instanceof AerospikeException.Timeout ? new java.util.concurrent.TimeoutException("aerospike read timed out") : error);
                 }
             }, readPolicy, key(userId));
         } catch (AerospikeException e) {

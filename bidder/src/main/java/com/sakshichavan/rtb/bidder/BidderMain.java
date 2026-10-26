@@ -67,7 +67,7 @@ public final class BidderMain {
                         System.getenv().getOrDefault("AEROSPIKE_HOST", "localhost"),
                         Integer.parseInt(System.getenv().getOrDefault("AEROSPIKE_PORT", "3000")),
                         System.getenv().getOrDefault("AEROSPIKE_NAMESPACE", "test"),
-                        (int) profileTimeoutMillis, Duration.ofSeconds(30))
+                        (int) profileTimeoutMillis + 2, Duration.ofSeconds(30))
                 : SyntheticProfiles.store();
         TargetingBidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
         BidPipeline pipeline = new BidPipeline(profileStore, engine, profileTimeoutMillis);

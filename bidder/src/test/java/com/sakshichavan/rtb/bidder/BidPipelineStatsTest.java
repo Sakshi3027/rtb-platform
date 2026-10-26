@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -33,6 +34,7 @@ class BidPipelineStatsTest {
             case "hit" -> CompletableFuture.completedFuture(new UserProfile(Set.of("gamer")));
             case "miss" -> CompletableFuture.completedFuture(UserProfile.UNKNOWN);
             case "error" -> CompletableFuture.<UserProfile>failedFuture(new IllegalStateException("down"));
+            case "store-timeout" -> CompletableFuture.<UserProfile>failedFuture(new TimeoutException("store timer"));
             default -> new CompletableFuture<UserProfile>();
         };
         TargetingBidEngine engine = new TargetingBidEngine(
@@ -40,11 +42,11 @@ class BidPipelineStatsTest {
                 new BidPricer(0.5), SpendGuard.UNLIMITED, FrequencyGuard.UNLIMITED);
 
         try (BidPipeline pipeline = new BidPipeline(store, engine, 20)) {
-            for (String user : List.of("hit", "miss", "error", "slow")) {
+            for (String user : List.of("hit", "miss", "error", "store-timeout", "slow")) {
                 pipeline.evaluate(request(user)).toCompletableFuture().get(1, TimeUnit.SECONDS);
             }
 
-            assertEquals(new ProfileStats(1, 1, 1, 1), pipeline.stats());
+            assertEquals(new ProfileStats(1, 1, 2, 1, 0, "CLOSED", 0), pipeline.stats());
         }
     }
 }
