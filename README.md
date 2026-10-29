@@ -21,21 +21,25 @@ A real-time bidding (RTB) platform in Java 21: a low-latency bidder that answers
 
 ```mermaid
 flowchart LR
-    SIM["Exchange simulator<br/>open-loop load, HdrHistogram"] -->|OpenRTB JSON over HTTP| LB{"Router<br/>consistent hashing on user id"}
-    LB --> B1["Bidder 1"]
-    LB --> B2["Bidder 2"]
-    LB --> B3["Bidder 3"]
-    B1 & B2 & B3 -->|"async Lua lease (1 call per ~320 bids)"| REDIS[("Redis<br/>daily budgets + pacing")]
-    B1 & B2 & B3 -->|"async get, 5 ms budget"| AERO[("Aerospike<br/>user profiles")]
+    SIM["Exchange simulator<br/>open-loop load"] -->|"OpenRTB JSON over HTTP"| LB{"Router<br/>consistent hash on user id"}
+    LB --> FLEET
+    subgraph FLEET["Bidder fleet"]
+        B1["Bidder 1"]
+        B2["Bidder 2"]
+        B3["Bidder 3"]
+    end
+    FLEET -->|"budget leases, about 1 call per 320 bids"| REDIS[("Redis<br/>daily budgets and pacing")]
+    FLEET -->|"profile lookups, 5 ms deadline"| AERO[("Aerospike<br/>user profiles")]
 ```
 
 Inside one bidder, a request flows through layers that each own one concern:
 
+```text
 Netty event loop (HTTP, TCP_NODELAY, keep-alive)
--> AdmissionController bounded worker pool, sheds requests that cannot meet the deadline
--> BidPipeline profile lookup with a 5 ms deadline and a circuit breaker
--> TargetingBidEngine pure and synchronous: bitset targeting, frequency caps, pricing, budget reservation
-
+  -> AdmissionController   bounded worker pool, sheds requests that cannot meet the deadline
+  -> BidPipeline           profile lookup with a 5 ms deadline and a circuit breaker
+  -> TargetingBidEngine    pure and synchronous: bitset targeting, frequency caps, pricing, budget reservation
+```
 
 The engine does no I/O at all ("functional core, imperative shell"), so the decision logic is fast and trivially testable, and every timeout, failure, and fallback lives in one thin async layer.
 
@@ -80,7 +84,7 @@ Environment: a single MacBook Air (Apple Silicon, 16 GB), with the bidder, simul
 
 **Budget reconciliation across 3 instances** (20 s at 3,000 QPS)
 
-| | |
+| Metric | Value |
 |---|---|
 | Leased from Redis | $40.50 (81 chunks of $0.50) |
 | Reserved by bids | $28.45 |
