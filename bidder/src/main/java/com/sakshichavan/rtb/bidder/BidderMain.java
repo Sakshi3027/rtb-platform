@@ -5,6 +5,7 @@ import com.sakshichavan.rtb.bidder.budget.CampaignBudgets;
 import com.sakshichavan.rtb.bidder.budget.InMemoryBudgetSource;
 import com.sakshichavan.rtb.bidder.budget.PacingPolicy;
 import com.sakshichavan.rtb.bidder.budget.RedisBudgetSource;
+import com.sakshichavan.rtb.bidder.budget.ReservationLedger;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.CampaignLoader;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
@@ -36,6 +37,7 @@ public final class BidderMain {
 
     public static void main(String[] args) throws InterruptedException {
         int port = Integer.parseInt(env("BIDDER_PORT", "8080"));
+        String publicUrl = env("BIDDER_PUBLIC_URL", "http://127.0.0.1:" + port);
         double shadingFactor = Double.parseDouble(env("BID_SHADING_FACTOR", "0.5"));
         long leaseChunkMicros = Micros.fromDollars(Double.parseDouble(env("LEASE_CHUNK_USD", "0.50")));
         String pacingMode = env("PACING", "even");
@@ -43,6 +45,7 @@ public final class BidderMain {
         long maxCappedUsers = Long.parseLong(env("FREQ_CAP_MAX_USERS", "1000000"));
         long profileTimeoutMillis = Long.parseLong(env("PROFILE_TIMEOUT_MS", "5"));
         String profileMode = env("PROFILE_STORE", "synthetic");
+        long reservationTtlSeconds = Long.parseLong(env("RESERVATION_TTL_SECONDS", "60"));
         boolean shedding = !"off".equals(env("SHEDDING", "on"));
         int ioThreads = Integer.parseInt(env("BIDDER_IO_THREADS", "0"));
         int workerThreads = Integer.parseInt(env("WORKER_THREADS",
@@ -65,6 +68,8 @@ public final class BidderMain {
                 : new RedisBudgetSource(redisUri, clock, pacing);
         CampaignBudgets budgets = new CampaignBudgets(budgetSource, leaseChunkMicros, leaseChunkMicros / 5, System::nanoTime);
         budgets.initialize(campaigns).toCompletableFuture().join();
+        ReservationLedger ledger = new ReservationLedger(
+                budgets, publicUrl, Duration.ofSeconds(reservationTtlSeconds), System::nanoTime);
 
         Duration longestCapWindow = campaigns.stream()
                 .map(Campaign::frequencyCap)
@@ -81,7 +86,8 @@ public final class BidderMain {
                         env("AEROSPIKE_NAMESPACE", "test"),
                         (int) profileTimeoutMillis + 2, Duration.ofSeconds(30))
                 : SyntheticProfiles.store();
-        TargetingBidEngine engine = new TargetingBidEngine(index, new BidPricer(shadingFactor), budgets, frequencyCapper);
+        TargetingBidEngine engine = new TargetingBidEngine(
+                index, new BidPricer(shadingFactor), budgets, frequencyCapper, ledger);
         BidPipeline pipeline = new BidPipeline(profileStore, engine, profileTimeoutMillis);
 
         AsyncBidEngine work = (simulatedWorkMicros > 0) ? SimulatedWork.wrap(pipeline, simulatedWorkMicros) : pipeline;
@@ -90,12 +96,13 @@ public final class BidderMain {
                 : null;
         AsyncBidEngine frontDoor = shedding ? admission : work;
 
-        BidderServer server = BidderServer.withAsyncEngine(port, ioThreads, frontDoor, () -> {
+        BidderServer server = BidderServer.withAsyncEngine(port, ioThreads, frontDoor, ledger, () -> {
             Map<String, Object> stats = new LinkedHashMap<>();
             stats.put("leaseChunkMicros", budgets.chunkMicros());
             stats.put("lowWaterMicros", budgets.lowWaterMicros());
             stats.put("campaigns", budgets.stats());
             stats.put("profiles", pipeline.stats());
+            stats.put("notices", ledger.stats());
             if (admission != null) {
                 stats.put("admission", admission.stats());
             }
@@ -112,13 +119,14 @@ public final class BidderMain {
         }));
 
         System.out.printf("bidder listening on port %d with %d campaigns, pacing %s, profiles: %s (timeout %dms), "
-                        + "budgets: %s, shedding: %s, io threads: %s%s%n",
+                        + "budgets: %s, shedding: %s, io threads: %s, notices at %s%s%n",
                 server.port(), index.size(),
                 "none".equals(pacingMode) ? "none" : "even (burst " + pacingBurst + ")",
                 profileMode, profileTimeoutMillis,
                 (redisUri == null) ? "in-memory" : "redis",
                 shedding ? "on (" + workerThreads + " workers, max queue delay " + maxQueueDelayMillis + "ms)" : "off",
                 (ioThreads == 0) ? "default" : String.valueOf(ioThreads),
+                publicUrl,
                 (simulatedWorkMicros > 0) ? ", simulated work " + simulatedWorkMicros + "us/bid" : "");
     }
 }

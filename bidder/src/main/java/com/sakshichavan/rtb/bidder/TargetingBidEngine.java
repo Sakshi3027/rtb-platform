@@ -1,5 +1,6 @@
 package com.sakshichavan.rtb.bidder;
 
+import com.sakshichavan.rtb.bidder.budget.ReservationLedger;
 import com.sakshichavan.rtb.bidder.budget.SpendGuard;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
@@ -21,6 +22,8 @@ import java.util.Optional;
  * The pure, synchronous decision core: no I/O. For each impression, find matching campaigns (including
  * audience segments from the user's profile) that clear the floor, try them from highest value down, and
  * bid with the first one under its frequency cap whose budget covers the impression cost.
+ * With a ReservationLedger, each bid's reservation is recorded for settlement and the bid carries
+ * win and loss notice URLs for the exchange to call.
  */
 public final class TargetingBidEngine implements BidEngine {
 
@@ -33,13 +36,21 @@ public final class TargetingBidEngine implements BidEngine {
     private final BidPricer pricer;
     private final SpendGuard spendGuard;
     private final FrequencyGuard frequencyGuard;
+    private final ReservationLedger ledger;
 
     public TargetingBidEngine(TargetingIndex index, BidPricer pricer, SpendGuard spendGuard,
                               FrequencyGuard frequencyGuard) {
+        this(index, pricer, spendGuard, frequencyGuard, null);
+    }
+
+    /** @param ledger records reservations and builds notice URLs; null disables settlement */
+    public TargetingBidEngine(TargetingIndex index, BidPricer pricer, SpendGuard spendGuard,
+                              FrequencyGuard frequencyGuard, ReservationLedger ledger) {
         this.index = index;
         this.pricer = pricer;
         this.spendGuard = spendGuard;
         this.frequencyGuard = frequencyGuard;
+        this.ledger = ledger;
     }
 
     @Override
@@ -67,8 +78,15 @@ public final class TargetingBidEngine implements BidEngine {
                 double price = pricer.price(campaign.maxBidCpm(), imp.bidFloor(), request.at());
                 long costMicros = Math.max(1, Micros.impressionCost(price));
                 if (spendGuard.tryReserve(campaign.id(), costMicros)) {
-                    bids.add(new Bid(request.id() + "-" + imp.id(), imp.id(), price,
-                            campaign.id(), campaign.creativeId(), null));
+                    String bidId = request.id() + "-" + imp.id();
+                    String nurl = null;
+                    String lurl = null;
+                    if (ledger != null) {
+                        ledger.record(bidId, campaign.id(), costMicros);
+                        nurl = ledger.winUrl(bidId);
+                        lurl = ledger.lossUrl(bidId);
+                    }
+                    bids.add(new Bid(bidId, imp.id(), price, campaign.id(), campaign.creativeId(), nurl, lurl));
                     break;
                 }
                 frequencyGuard.release(userId, campaign);

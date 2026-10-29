@@ -32,29 +32,35 @@ public final class BidderServer implements AutoCloseable {
     private final Channel serverChannel;
 
     public BidderServer(int port, BidEngine engine) throws InterruptedException {
-        this(port, 0, AsyncBidEngine.of(engine), () -> Map.of());
+        this(port, 0, AsyncBidEngine.of(engine), NoticeSink.NONE, () -> Map.of());
     }
 
     public BidderServer(int port, BidEngine engine, Supplier<Object> stats) throws InterruptedException {
-        this(port, 0, AsyncBidEngine.of(engine), stats);
+        this(port, 0, AsyncBidEngine.of(engine), NoticeSink.NONE, stats);
     }
 
     /** For engines that do I/O, such as BidPipeline. Uses Netty's default I/O thread count. */
     public static BidderServer withAsyncEngine(int port, AsyncBidEngine engine, Supplier<Object> stats)
             throws InterruptedException {
-        return new BidderServer(port, 0, engine, stats);
+        return new BidderServer(port, 0, engine, NoticeSink.NONE, stats);
     }
 
     /** @param ioThreads number of I/O event loop threads; 0 means Netty's default (2 per core) */
     public static BidderServer withAsyncEngine(int port, int ioThreads, AsyncBidEngine engine, Supplier<Object> stats)
             throws InterruptedException {
-        return new BidderServer(port, ioThreads, engine, stats);
+        return new BidderServer(port, ioThreads, engine, NoticeSink.NONE, stats);
     }
 
-    private BidderServer(int port, int ioThreads, AsyncBidEngine engine, Supplier<Object> stats)
+    /** Full form: also receives win and loss notices. */
+    public static BidderServer withAsyncEngine(int port, int ioThreads, AsyncBidEngine engine, NoticeSink notices,
+                                               Supplier<Object> stats) throws InterruptedException {
+        return new BidderServer(port, ioThreads, engine, notices, stats);
+    }
+
+    private BidderServer(int port, int ioThreads, AsyncBidEngine engine, NoticeSink notices, Supplier<Object> stats)
             throws InterruptedException {
         this.workerGroup = new NioEventLoopGroup(ioThreads);
-        BidHandler handler = new BidHandler(engine, stats);
+        BidHandler handler = new BidHandler(engine, notices, stats);
         try {
             ServerBootstrap bootstrap = new ServerBootstrap()
                     .group(bossGroup, workerGroup)

@@ -21,6 +21,7 @@ import java.util.function.LongSupplier;
  * BudgetSource, so the refill usually lands before the lease runs dry.
  * Exhausted campaigns and failed refills back off for one second to avoid hammering the source.
  * Counts granted and reserved micros per campaign so spend can be reconciled across a fleet.
+ * Reservations that turn out not to be spent (lost auctions, clearing below the bid) are released back.
  */
 public final class CampaignBudgets implements SpendGuard {
 
@@ -76,6 +77,19 @@ public final class CampaignBudgets implements SpendGuard {
             refill(campaignId, slot);
         }
         return reserved;
+    }
+
+    /** Returns previously reserved budget that will not be spent, e.g. a lost auction. */
+    public void release(String campaignId, long micros) {
+        if (micros <= 0) {
+            return;
+        }
+        Slot slot = slots.get(campaignId);
+        if (slot == null) {
+            return;
+        }
+        slot.reservedMicros.add(-micros);
+        slot.lease.release(micros);
     }
 
     public long localRemainingMicros(String campaignId) {
