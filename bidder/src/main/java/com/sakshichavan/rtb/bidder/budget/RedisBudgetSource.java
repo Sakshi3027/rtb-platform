@@ -2,6 +2,7 @@ package com.sakshichavan.rtb.bidder.budget;
 
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisFuture;
+import io.lettuce.core.RedisURI;
 import io.lettuce.core.ScriptOutputType;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
@@ -16,6 +17,10 @@ import java.util.concurrent.CompletionStage;
  * The lease script enforces both the budget and the pacing cap atomically: concurrent bidders can never
  * overspend, and pacing applies globally across all instances with no extra coordination.
  * One Lettuce connection is shared by all threads; commands are pipelined and never block.
+ *
+ * Commands time out after COMMAND_TIMEOUT instead of Lettuce's 60-second default. A refill stuck for a minute
+ * would hold the lease's single-flight refill flag and block every retry; failing fast lets the caller's
+ * backoff retry as soon as Redis is back.
  */
 public final class RedisBudgetSource implements BudgetSource {
 
@@ -45,6 +50,7 @@ public final class RedisBudgetSource implements BudgetSource {
             """;
 
     private static final Duration KEY_TTL = Duration.ofDays(2);
+    private static final Duration COMMAND_TIMEOUT = Duration.ofSeconds(1);
 
     private final RedisClient client;
     private final StatefulRedisConnection<String, String> connection;
@@ -57,7 +63,9 @@ public final class RedisBudgetSource implements BudgetSource {
     }
 
     public RedisBudgetSource(String redisUri, Clock clock, PacingPolicy pacing) {
-        this.client = RedisClient.create(redisUri);
+        RedisURI uri = RedisURI.create(redisUri);
+        uri.setTimeout(COMMAND_TIMEOUT);
+        this.client = RedisClient.create(uri);
         this.connection = client.connect();
         this.commands = connection.async();
         this.clock = clock;
