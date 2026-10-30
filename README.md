@@ -23,9 +23,11 @@ A real-time bidding (RTB) platform in Java 21: a low-latency bidder that answers
 
 ## Architecture
 
+**Bidding path:** the exchange sends bid requests through a router to a fleet of bidders, which consult Redis and Aerospike under strict deadlines.
+
 ```mermaid
 flowchart LR
-    SIM["Exchange simulator<br/>open-loop load, auctions"] -->|"OpenRTB bid requests"| LB{"Router<br/>consistent hash on user id"}
+    SIM["Exchange simulator<br/>open-loop load, auctions"] -->|"bid requests"| LB{"Router<br/>consistent hash<br/>on user id"}
     LB --> FLEET
     SIM -.->|"win and loss notices"| FLEET
     subgraph FLEET["Bidder fleet"]
@@ -33,13 +35,19 @@ flowchart LR
         B2["Bidder 2"]
         B3["Bidder 3"]
     end
-    FLEET -->|"budget leases, about 1 call per 320 bids"| REDIS[("Redis<br/>daily budgets and pacing")]
-    FLEET -->|"profile lookups, 5 ms deadline"| AERO[("Aerospike<br/>user profiles")]
-    FLEET -->|"one event per settlement"| K1[["Kafka<br/>rtb.settlements"]]
+    FLEET -->|"budget leases"| REDIS[("Redis<br/>budgets and pacing")]
+    FLEET -->|"profiles, 5 ms"| AERO[("Aerospike<br/>user profiles")]
+```
+
+**Settlement pipeline:** every auction outcome becomes exactly one event, which is deduplicated and billed exactly once.
+
+```mermaid
+flowchart LR
+    FLEET["Bidder fleet"] -->|"one event per settlement"| K1[["Kafka<br/>rtb.settlements"]]
     K1 --> FLINK["Flink<br/>dedup by event id"]
-    FLINK -->|"transactional, exactly-once"| K2[["Kafka<br/>rtb.settlements.deduped"]]
-    K2 --> BILL["Billing consumer"]
-    BILL -->|"events and offsets in one transaction"| PG[("Postgres<br/>billing ledger")]
+    FLINK -->|"exactly-once"| K2[["Kafka<br/>deduped"]]
+    K2 --> BILL["Billing<br/>consumer"]
+    BILL -->|"events + offsets,<br/>one transaction"| PG[("Postgres<br/>ledger")]
 ```
 
 Inside one bidder, a request flows through layers that each own one concern:
@@ -48,7 +56,7 @@ Inside one bidder, a request flows through layers that each own one concern:
 Netty event loop (HTTP, TCP_NODELAY, keep-alive)
   -> AdmissionController   bounded worker pool, sheds requests that cannot meet the deadline
   -> BidPipeline           profile lookup with a 5 ms deadline and a circuit breaker
-  -> TargetingBidEngine    pure and synchronous: bitset targeting, frequency caps, pricing, budget reservation
+  -> TargetingBidEngine    pure, no I/O: targeting, frequency caps, pricing, budget
 ```
 
 The engine does no I/O at all ("functional core, imperative shell"), so the decision logic is fast and trivially testable, and every timeout, failure, and fallback lives in one thin async layer.
