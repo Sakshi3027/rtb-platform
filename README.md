@@ -42,7 +42,7 @@ flowchart LR
 **Settlement pipeline:** every auction outcome becomes exactly one event, which is deduplicated and billed exactly once.
 
 ```mermaid
-flowchart LR
+flowchart TB
     FLEET["Bidder fleet"] -->|"one event per settlement"| K1[["Kafka<br/>rtb.settlements"]]
     K1 --> FLINK["Flink<br/>dedup by event id"]
     FLINK -->|"exactly-once"| K2[["Kafka<br/>deduped"]]
