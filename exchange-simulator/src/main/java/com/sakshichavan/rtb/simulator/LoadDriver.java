@@ -1,5 +1,6 @@
 package com.sakshichavan.rtb.simulator;
 
+import com.sakshichavan.rtb.common.money.Micros;
 import com.sakshichavan.rtb.common.openrtb.Bid;
 import com.sakshichavan.rtb.common.openrtb.BidRequest;
 import com.sakshichavan.rtb.common.openrtb.BidResponse;
@@ -20,6 +21,7 @@ import java.util.concurrent.CompletionException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
@@ -28,31 +30,39 @@ import java.util.concurrent.locks.LockSupport;
  * A Router picks the bidder for each request, like the load balancer in front of a fleet.
  * Records response time (from the scheduled send, avoiding coordinated omission), service time
  * (from the actual send), and per-user frequency ground truth for audited campaigns.
+ * With an AuctionHouse, it also runs each auction and calls the bid's win or loss notice URL.
  */
 public final class LoadDriver implements AutoCloseable {
 
     private static final long MAX_LATENCY_MICROS = TimeUnit.SECONDS.toMicros(10);
+    private static final Duration NOTICE_DRAIN_TIMEOUT = Duration.ofSeconds(10);
 
     private final Router router;
     private final Duration timeoutOverride;
+    private final AuctionHouse auctionHouse;
     private final HttpClient client;
 
     /** Single bidder; enforces each request's tmax as its deadline, like a real exchange. */
     public LoadDriver(URI target) {
-        this(Router.single(target), null);
+        this(Router.single(target), null, null);
     }
 
     public LoadDriver(URI target, Duration timeoutOverride) {
-        this(Router.single(target), timeoutOverride);
+        this(Router.single(target), timeoutOverride, null);
+    }
+
+    public LoadDriver(Router router, Duration timeoutOverride) {
+        this(router, timeoutOverride, null);
     }
 
     /**
-     * @param timeoutOverride if non-null, used instead of each request's tmax. Useful for tests that
-     *                        check behavior unrelated to deadlines, and for benchmarking without cutoffs.
+     * @param timeoutOverride if non-null, used instead of each request's tmax
+     * @param auctionHouse    if non-null, auctions are simulated and notices sent to the bidders
      */
-    public LoadDriver(Router router, Duration timeoutOverride) {
+    public LoadDriver(Router router, Duration timeoutOverride, AuctionHouse auctionHouse) {
         this.router = router;
         this.timeoutOverride = timeoutOverride;
+        this.auctionHouse = auctionHouse;
         this.client = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .connectTimeout(Duration.ofSeconds(2))
@@ -79,6 +89,7 @@ public final class LoadDriver implements AutoCloseable {
         Histogram responseTime = new ConcurrentHistogram(MAX_LATENCY_MICROS, 3);
         Histogram serviceTime = new ConcurrentHistogram(MAX_LATENCY_MICROS, 3);
         Outcomes outcomes = new Outcomes();
+        Market market = new Market();
         CountDownLatch completed = new CountDownLatch((int) totalRequests);
 
         long start = System.nanoTime();
@@ -87,6 +98,7 @@ public final class LoadDriver implements AutoCloseable {
             waitUntil(intendedStart);
 
             BidRequest request = generator.next();
+            AuctionHouse.Plan plan = (auctionHouse == null) ? null : auctionHouse.plan(request);
             Duration deadline = (timeoutOverride != null) ? timeoutOverride : Duration.ofMillis(request.tmax());
             HttpRequest httpRequest = HttpRequest.newBuilder(router.route(request))
                     .timeout(deadline)
@@ -100,15 +112,41 @@ public final class LoadDriver implements AutoCloseable {
                         long now = System.nanoTime();
                         record(responseTime, now - intendedStart);
                         record(serviceTime, now - actualStart);
-                        outcomes.record(request, response, error);
+                        BidResponse validBid = outcomes.record(request, response, error);
+                        if (validBid != null && plan != null) {
+                            settleAuction(plan, request, validBid, market);
+                        }
                         completed.countDown();
                     });
         }
         double sendSeconds = (System.nanoTime() - start) / 1e9;
 
         completed.await(30, TimeUnit.SECONDS);
+        market.awaitNotices(NOTICE_DRAIN_TIMEOUT);
         return outcomes.toReport(totalRequests, totalRequests / sendSeconds,
-                LatencySummary.from(responseTime), LatencySummary.from(serviceTime), capsToAudit);
+                LatencySummary.from(responseTime), LatencySummary.from(serviceTime), capsToAudit,
+                (auctionHouse == null) ? null : market.summary());
+    }
+
+    private void settleAuction(AuctionHouse.Plan plan, BidRequest request, BidResponse bid, Market market) {
+        AuctionHouse.Outcome outcome = AuctionHouse.settle(plan, request, bid);
+        market.record(outcome);
+        for (String url : outcome.noticeUrls()) {
+            HttpRequest notice;
+            try {
+                notice = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofSeconds(2)).GET().build();
+            } catch (IllegalArgumentException e) {
+                market.failures.increment();
+                continue;
+            }
+            market.outstanding.incrementAndGet();
+            client.sendAsync(notice, HttpResponse.BodyHandlers.discarding()).whenComplete((response, error) -> {
+                if (error != null || response.statusCode() != 204) {
+                    market.failures.increment();
+                }
+                market.outstanding.decrementAndGet();
+            });
+        }
     }
 
     private static void record(Histogram histogram, long elapsedNanos) {
@@ -127,6 +165,48 @@ public final class LoadDriver implements AutoCloseable {
         client.close();
     }
 
+    /** Thread-safe auction and notice counters for one run. */
+    private static final class Market {
+        private final LongAdder won = new LongAdder();
+        private final LongAdder lost = new LongAdder();
+        private final LongAdder silentLosses = new LongAdder();
+        private final LongAdder winNotices = new LongAdder();
+        private final LongAdder lossNotices = new LongAdder();
+        private final LongAdder duplicates = new LongAdder();
+        private final LongAdder failures = new LongAdder();
+        private final LongAdder spendMicros = new LongAdder();
+        private final AtomicInteger outstanding = new AtomicInteger();
+
+        void record(AuctionHouse.Outcome outcome) {
+            int firstSends = outcome.noticeUrls().size() - outcome.duplicates();
+            if (outcome.won()) {
+                won.increment();
+                spendMicros.add(Micros.impressionCost(outcome.clearingCpm()));
+                winNotices.add(firstSends);
+            } else {
+                lost.increment();
+                if (outcome.noticeUrls().isEmpty()) {
+                    silentLosses.increment();
+                } else {
+                    lossNotices.add(firstSends);
+                }
+            }
+            duplicates.add(outcome.duplicates());
+        }
+
+        void awaitNotices(Duration maxWait) throws InterruptedException {
+            long deadline = System.nanoTime() + maxWait.toNanos();
+            while (outstanding.get() > 0 && System.nanoTime() - deadline < 0) {
+                Thread.sleep(10);
+            }
+        }
+
+        MarketSummary summary() {
+            return new MarketSummary(won.sum(), lost.sum(), silentLosses.sum(), winNotices.sum(),
+                    lossNotices.sum(), duplicates.sum(), failures.sum(), spendMicros.sum());
+        }
+    }
+
     /** Thread-safe outcome counters plus the frequency audit. LongAdder avoids contention across threads. */
     private static final class Outcomes {
         private final LongAdder bids = new LongAdder();
@@ -136,7 +216,8 @@ public final class LoadDriver implements AutoCloseable {
         private final LongAdder errors = new LongAdder();
         private final FrequencyAudit audit = new FrequencyAudit();
 
-        void record(BidRequest request, HttpResponse<byte[]> response, Throwable error) {
+        /** Classifies the response; returns the parsed bid when it is valid, otherwise null. */
+        BidResponse record(BidRequest request, HttpResponse<byte[]> response, Throwable error) {
             if (error != null) {
                 Throwable cause = (error instanceof CompletionException && error.getCause() != null)
                         ? error.getCause()
@@ -146,20 +227,27 @@ public final class LoadDriver implements AutoCloseable {
                 } else {
                     errors.increment();
                 }
-                return;
+                return null;
             }
             switch (response.statusCode()) {
-                case 204 -> noBids.increment();
+                case 204 -> {
+                    noBids.increment();
+                    return null;
+                }
                 case 200 -> {
                     BidResponse bidResponse = parseValid(request, response.body());
                     if (bidResponse == null) {
                         invalid.increment();
-                    } else {
-                        bids.increment();
-                        auditExposures(request, bidResponse);
+                        return null;
                     }
+                    bids.increment();
+                    auditExposures(request, bidResponse);
+                    return bidResponse;
                 }
-                default -> errors.increment();
+                default -> {
+                    errors.increment();
+                    return null;
+                }
             }
         }
 
@@ -187,11 +275,11 @@ public final class LoadDriver implements AutoCloseable {
         }
 
         LoadReport toReport(long requests, double sendRate, LatencySummary responseTime,
-                            LatencySummary serviceTime, Map<String, Integer> capsToAudit) {
+                            LatencySummary serviceTime, Map<String, Integer> capsToAudit, MarketSummary market) {
             return new LoadReport(
                     requests,
                     bids.sum(), noBids.sum(), invalid.sum(), timeouts.sum(), errors.sum(),
-                    sendRate, responseTime, serviceTime, audit.summarize(capsToAudit));
+                    sendRate, responseTime, serviceTime, audit.summarize(capsToAudit), market);
         }
     }
 }

@@ -11,7 +11,7 @@ import java.util.concurrent.CountDownLatch;
 
 /**
  * Command-line entry point.
- *   run  : drive open-loop load at one or more bidders and print a latency and frequency report
+ *   run  : drive open-loop load at one or more bidders and print a latency, frequency, and auction report
  *   stub : start the stub bidder and keep it running until Ctrl+C
  */
 public final class SimulatorMain {
@@ -47,16 +47,25 @@ public final class SimulatorMain {
         int users = intFlag(flags, "users", 100_000);
         Map<String, Integer> caps = parseCaps(flags.get("caps"));
 
+        AuctionHouse auctionHouse = "on".equals(flags.getOrDefault("auction", "off"))
+                ? new AuctionHouse(
+                        Long.parseLong(flags.getOrDefault("auction-seed", "7")),
+                        doubleFlag(flags, "competition-mu", 0.4),
+                        doubleFlag(flags, "competition-sigma", 0.5),
+                        doubleFlag(flags, "loss-notice-rate", 0.9),
+                        doubleFlag(flags, "duplicate-rate", 0.05))
+                : null;
+
         WeightedSampler<Integer> userSampler = TrafficGenerator.userSampler(users);
         Router router = Router.of(routing, targets);
 
-        try (LoadDriver driver = new LoadDriver(router, null)) {
+        try (LoadDriver driver = new LoadDriver(router, null, auctionHouse)) {
             if (warmupSeconds > 0) {
                 System.out.printf("warming up: %ds at %d req/s (results discarded)%n", warmupSeconds, qps);
                 driver.run(new TrafficGenerator(seed + 1, 1, userSampler), qps, Duration.ofSeconds(warmupSeconds));
             }
-            System.out.printf("measuring: %ds at %d req/s, routing %s across %d target(s)%n",
-                    durationSeconds, qps, routing, targets.size());
+            System.out.printf("measuring: %ds at %d req/s, routing %s across %d target(s)%s%n",
+                    durationSeconds, qps, routing, targets.size(), (auctionHouse != null) ? ", auctions on" : "");
             LoadReport report = driver.run(
                     new TrafficGenerator(seed, 0, userSampler), qps, Duration.ofSeconds(durationSeconds), caps);
             System.out.println(report.summary());
@@ -109,12 +118,18 @@ public final class SimulatorMain {
         return Integer.parseInt(flags.getOrDefault(name, String.valueOf(defaultValue)));
     }
 
+    private static double doubleFlag(Map<String, String> flags, String name, double defaultValue) {
+        return Double.parseDouble(flags.getOrDefault(name, String.valueOf(defaultValue)));
+    }
+
     private static void printUsage() {
         System.err.println("""
                 usage:
                   run  --target URL | --targets URL1,URL2,...  --routing round-robin|user-hash
                        --qps N --duration SECONDS --warmup SECONDS --seed N --users N
                        --caps campaignA=3,campaignB=5
+                       --auction on --auction-seed N --competition-mu X --competition-sigma X
+                       --loss-notice-rate 0.0-1.0 --duplicate-rate 0.0-1.0
                   stub --port N --delay-ms N --bid-rate 0.0-1.0""");
     }
 }

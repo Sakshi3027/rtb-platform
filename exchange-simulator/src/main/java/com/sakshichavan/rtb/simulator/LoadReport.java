@@ -8,6 +8,7 @@ import java.util.List;
  *               includes any lag in the sender, so there is no coordinated omission).
  * serviceTime:  measured from the actual send time (network plus bidder only).
  * exposures:    per-user frequency ground truth for the campaigns that were audited.
+ * market:       auction and notice results, or null when auctions were not simulated.
  */
 public record LoadReport(
         long requests,
@@ -19,7 +20,8 @@ public record LoadReport(
         double sendRate,
         LatencySummary responseTime,
         LatencySummary serviceTime,
-        List<CampaignExposure> exposures) {
+        List<CampaignExposure> exposures,
+        MarketSummary market) {
 
     public LoadReport {
         exposures = List.copyOf(exposures);
@@ -42,6 +44,9 @@ public record LoadReport(
                         serviceTime.format()));
         for (CampaignExposure exposure : exposures) {
             text.append("\nfrequency    ").append(exposure.format());
+        }
+        if (market != null) {
+            text.append('\n').append(market.format());
         }
         return text.toString();
     }
