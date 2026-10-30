@@ -1,0 +1,50 @@
+{
+  "train_rows": 3000000,
+  "test_rows": 1000000,
+  "oracle_log_loss": 0.047592149108945804,
+  "baseline_log_loss": 0.04960692470233209,
+  "selected_model": "gradient-boosted trees",
+  "onnx_max_abs_diff": 1.2471259576429805e-07,
+  "results": [
+    {
+      "model": "oracle (true CTR)",
+      "log_loss": 0.047592149108945804,
+      "normalized_entropy": 0.9593851945978105,
+      "auc": 0.6634324590275491,
+      "calibration": 1.0043820268829664,
+      "high_value_calibration": 1.0,
+      "mae_vs_truth": 0.0,
+      "gap_closed": 1.0
+    },
+    {
+      "model": "baseline (constant)",
+      "log_loss": 0.04960692470233209,
+      "normalized_entropy": 1.0,
+      "auc": 0.5,
+      "calibration": 1.00486674391657,
+      "high_value_calibration": 0.12634014887240658,
+      "mae_vs_truth": 0.004127464644,
+      "gap_closed": 0.0
+    },
+    {
+      "model": "logistic regression",
+      "log_loss": 0.048840532592855965,
+      "normalized_entropy": 0.9845507030706925,
+      "auc": 0.6156973251582946,
+      "calibration": 1.0021175809207843,
+      "high_value_calibration": 0.21230225219315096,
+      "mae_vs_truth": 0.0032681971684846147,
+      "gap_closed": 0.38038584147628635
+    },
+    {
+      "model": "gradient-boosted trees",
+      "log_loss": 0.04772602994740245,
+      "normalized_entropy": 0.9620840282638763,
+      "auc": 0.6578837524849883,
+      "calibration": 1.0036631962132516,
+      "high_value_calibration": 0.9074660312822038,
+      "mae_vs_truth": 0.001042700348303125,
+      "gap_closed": 0.9335504961961396
+    }
+  ]
+}

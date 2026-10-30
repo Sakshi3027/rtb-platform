@@ -23,6 +23,23 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
+import onnx.helper
+
+# Compatibility shim: skl2onnx's tree converter passes booleans in integer-list attributes, which current
+# protobuf releases reject ("Expected an int, got a boolean"). In ONNX these flags are 0/1 integers, so
+# converting them is exact; the ONNX-vs-scikit-learn parity check below verifies the exported model.
+_original_make_attribute = onnx.helper.make_attribute
+
+
+def _make_attribute_with_int_flags(key, value, *args, **kwargs):
+    if isinstance(value, np.ndarray) and value.dtype == np.bool_:
+        value = value.astype(np.int64)
+    elif isinstance(value, (list, tuple)) and any(isinstance(v, (bool, np.bool_)) for v in value):
+        value = [int(v) if isinstance(v, (bool, np.bool_)) else v for v in value]
+    return _original_make_attribute(key, value, *args, **kwargs)
+
+
+onnx.helper.make_attribute = _make_attribute_with_int_flags
 
 CATEGORICAL = ["campaign_id", "size", "country", "category"]
 SEGMENTS = ["sports-fan", "auto-intender", "traveler", "foodie", "gamer", "finance-pro"]
