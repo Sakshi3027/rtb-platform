@@ -78,7 +78,7 @@ public final class TargetingBidEngine implements BidEngine {
                 double price = pricer.price(campaign.maxBidCpm(), imp.bidFloor(), request.at());
                 long costMicros = Math.max(1, Micros.impressionCost(price));
                 if (spendGuard.tryReserve(campaign.id(), costMicros)) {
-                    String bidId = request.id() + "-" + imp.id();
+                    String bidId = (ledger != null) ? ledger.nextBidId() : request.id() + "-" + imp.id();
                     String nurl = null;
                     String lurl = null;
                     if (ledger != null) {

@@ -23,6 +23,7 @@ import java.util.function.LongSupplier;
  * Exactly-once: settling starts with an atomic remove of the pending reservation, so only the first notice
  * for a bid can settle it; retried or duplicate notices find nothing and change nothing.
  * Every settlement is published as exactly one event (WIN, LOSS, or EXPIRED).
+ * Bid ids come from this ledger and are globally unique, so distinct bids never share a reservation or an event id.
  */
 public final class ReservationLedger implements NoticeSink {
 
@@ -32,6 +33,7 @@ public final class ReservationLedger implements NoticeSink {
     private final CampaignBudgets budgets;
     private final String noticeBaseUrl;
     private final SettlementPublisher publisher;
+    private final BidIds bidIds;
     private final Cache<String, Reservation> pending;
 
     private final LongAdder wins = new LongAdder();
@@ -50,6 +52,7 @@ public final class ReservationLedger implements NoticeSink {
         this.budgets = budgets;
         this.noticeBaseUrl = noticeBaseUrl;
         this.publisher = publisher;
+        this.bidIds = BidIds.random();
         this.pending = Caffeine.newBuilder()
                 .expireAfterWrite(ttl)
                 .maximumSize(2_000_000)
@@ -65,6 +68,11 @@ public final class ReservationLedger implements NoticeSink {
                     }
                 })
                 .build();
+    }
+
+    /** A new globally unique bid id. */
+    public String nextBidId() {
+        return bidIds.next();
     }
 
     public void record(String bidId, String campaignId, long micros) {
