@@ -20,8 +20,9 @@ import java.util.Optional;
 
 /**
  * The pure, synchronous decision core: no I/O. For each impression, find matching campaigns (including
- * audience segments from the user's profile) that clear the floor, try them from highest value down, and
- * bid with the first one under its frequency cap whose budget covers the impression cost.
+ * audience segments from the user's profile), value the impression for each one, keep those whose value clears
+ * the floor, and try them from highest value down: bid with the first one under its frequency cap whose budget
+ * covers the impression cost. Valuation is pluggable: fixed prices, or predicted click probability.
  * With a ReservationLedger, each bid's reservation is recorded for settlement and the bid carries
  * win and loss notice URLs for the exchange to call.
  */
@@ -29,28 +30,38 @@ public final class TargetingBidEngine implements BidEngine {
 
     static final String SEAT = "rtb-platform";
 
-    private static final Comparator<Campaign> HIGHEST_VALUE_FIRST =
-            Comparator.comparingDouble(Campaign::maxBidCpm).reversed();
+    private record Candidate(Campaign campaign, double valueCpm) {
+    }
+
+    private static final Comparator<Candidate> HIGHEST_VALUE_FIRST =
+            Comparator.comparingDouble(Candidate::valueCpm).reversed();
 
     private final TargetingIndex index;
     private final BidPricer pricer;
     private final SpendGuard spendGuard;
     private final FrequencyGuard frequencyGuard;
     private final ReservationLedger ledger;
+    private final CampaignValuer valuer;
 
     public TargetingBidEngine(TargetingIndex index, BidPricer pricer, SpendGuard spendGuard,
                               FrequencyGuard frequencyGuard) {
-        this(index, pricer, spendGuard, frequencyGuard, null);
+        this(index, pricer, spendGuard, frequencyGuard, null, CampaignValuer.FIXED);
     }
 
     /** @param ledger records reservations and builds notice URLs; null disables settlement */
     public TargetingBidEngine(TargetingIndex index, BidPricer pricer, SpendGuard spendGuard,
                               FrequencyGuard frequencyGuard, ReservationLedger ledger) {
+        this(index, pricer, spendGuard, frequencyGuard, ledger, CampaignValuer.FIXED);
+    }
+
+    public TargetingBidEngine(TargetingIndex index, BidPricer pricer, SpendGuard spendGuard,
+                              FrequencyGuard frequencyGuard, ReservationLedger ledger, CampaignValuer valuer) {
         this.index = index;
         this.pricer = pricer;
         this.spendGuard = spendGuard;
         this.frequencyGuard = frequencyGuard;
         this.ledger = ledger;
+        this.valuer = valuer;
     }
 
     @Override
@@ -63,19 +74,29 @@ public final class TargetingBidEngine implements BidEngine {
         List<Bid> bids = new ArrayList<>(request.imp().size());
 
         for (Imp imp : request.imp()) {
-            List<Campaign> eligible = new ArrayList<>();
+            List<Campaign> matched = new ArrayList<>();
             for (Campaign campaign : index.match(request, imp, profile.segments())) {
-                if (campaign.maxBidCpm() >= imp.bidFloor()) {
-                    eligible.add(campaign);
+                matched.add(campaign);
+            }
+            if (matched.isEmpty()) {
+                continue;
+            }
+
+            double[] values = valuer.valuesCpm(request, imp, profile, matched);
+            List<Candidate> eligible = new ArrayList<>(matched.size());
+            for (int i = 0; i < matched.size(); i++) {
+                if (values[i] > 0 && values[i] >= imp.bidFloor()) {
+                    eligible.add(new Candidate(matched.get(i), values[i]));
                 }
             }
             eligible.sort(HIGHEST_VALUE_FIRST);
 
-            for (Campaign campaign : eligible) {
+            for (Candidate candidate : eligible) {
+                Campaign campaign = candidate.campaign();
                 if (!frequencyGuard.tryAcquire(userId, campaign)) {
                     continue;
                 }
-                double price = pricer.price(campaign.maxBidCpm(), imp.bidFloor(), request.at());
+                double price = pricer.price(candidate.valueCpm(), imp.bidFloor(), request.at());
                 long costMicros = Math.max(1, Micros.impressionCost(price));
                 if (spendGuard.tryReserve(campaign.id(), costMicros)) {
                     String bidId = (ledger != null) ? ledger.nextBidId() : request.id() + "-" + imp.id();

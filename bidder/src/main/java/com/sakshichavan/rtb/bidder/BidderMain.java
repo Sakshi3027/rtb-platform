@@ -12,6 +12,8 @@ import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
 import com.sakshichavan.rtb.bidder.events.KafkaSettlementPublisher;
 import com.sakshichavan.rtb.bidder.events.SettlementPublisher;
 import com.sakshichavan.rtb.bidder.frequency.FrequencyCapper;
+import com.sakshichavan.rtb.bidder.ml.CtrValuer;
+import com.sakshichavan.rtb.bidder.ml.OnnxCtrModel;
 import com.sakshichavan.rtb.bidder.profile.AerospikeProfileStore;
 import com.sakshichavan.rtb.bidder.profile.ProfileStore;
 import com.sakshichavan.rtb.bidder.profile.SyntheticProfiles;
@@ -56,6 +58,11 @@ public final class BidderMain {
         long maxQueueDelayMillis = Long.parseLong(env("MAX_QUEUE_DELAY_MS", "20"));
         long simulatedWorkMicros = Long.parseLong(env("SIMULATED_WORK_MICROS", "0"));
         String settlementsTopic = env("SETTLEMENTS_TOPIC", "rtb.settlements");
+        String biddingMode = env("BIDDING", "fixed");
+        double referenceCtr = Double.parseDouble(env("CTR_REFERENCE", "0.0087"));
+        double maxMultiplier = Double.parseDouble(env("CTR_MAX_MULTIPLIER", "3.0"));
+        long ctrCacheSize = Long.parseLong(env("CTR_CACHE_SIZE", "500000"));
+        String ctrModelFile = System.getenv("CTR_MODEL_PATH");
         String kafkaBootstrap = System.getenv("KAFKA_BOOTSTRAP");
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
         String redisUri = System.getenv("REDIS_URI");
@@ -91,6 +98,16 @@ public final class BidderMain {
                 .orElse(Duration.ofHours(1));
         FrequencyCapper frequencyCapper = new FrequencyCapper(maxCappedUsers, longestCapWindow, System::nanoTime);
 
+        OnnxCtrModel ctrModel = null;
+        CtrValuer ctrValuer = null;
+        if ("ctr".equals(biddingMode)) {
+            ctrModel = (ctrModelFile == null)
+                    ? OnnxCtrModel.fromClasspath("/models/ctr-v1.onnx")
+                    : OnnxCtrModel.fromFile(Path.of(ctrModelFile));
+            ctrValuer = new CtrValuer(ctrModel, referenceCtr, maxMultiplier, ctrCacheSize);
+        }
+        CampaignValuer valuer = (ctrValuer != null) ? ctrValuer : CampaignValuer.FIXED;
+
         ProfileStore profileStore = "aerospike".equals(profileMode)
                 ? AerospikeProfileStore.connectWithRetry(
                         env("AEROSPIKE_HOST", "localhost"),
@@ -99,7 +116,7 @@ public final class BidderMain {
                         (int) profileTimeoutMillis + 2, Duration.ofSeconds(30))
                 : SyntheticProfiles.store();
         TargetingBidEngine engine = new TargetingBidEngine(
-                index, new BidPricer(shadingFactor), budgets, frequencyCapper, ledger);
+                index, new BidPricer(shadingFactor), budgets, frequencyCapper, ledger, valuer);
         BidPipeline pipeline = new BidPipeline(profileStore, engine, profileTimeoutMillis);
 
         AsyncBidEngine work = (simulatedWorkMicros > 0) ? SimulatedWork.wrap(pipeline, simulatedWorkMicros) : pipeline;
@@ -108,6 +125,8 @@ public final class BidderMain {
                 : null;
         AsyncBidEngine frontDoor = shedding ? admission : work;
 
+        CtrValuer statsValuer = ctrValuer;
+        OnnxCtrModel modelToClose = ctrModel;
         BidderServer server = BidderServer.withAsyncEngine(port, ioThreads, frontDoor, ledger, () -> {
             Map<String, Object> stats = new LinkedHashMap<>();
             stats.put("leaseChunkMicros", budgets.chunkMicros());
@@ -115,6 +134,9 @@ public final class BidderMain {
             stats.put("campaigns", budgets.stats());
             stats.put("profiles", pipeline.stats());
             stats.put("notices", ledger.stats());
+            if (statsValuer != null) {
+                stats.put("bidding", statsValuer.stats());
+            }
             if (kafka != null) {
                 stats.put("events", kafka.stats());
             }
@@ -133,11 +155,14 @@ public final class BidderMain {
             if (kafka != null) {
                 kafka.close();
             }
+            if (modelToClose != null) {
+                modelToClose.close();
+            }
             budgetSource.close();
         }));
 
         System.out.printf("bidder listening on port %d with %d campaigns, pacing %s, profiles: %s (timeout %dms), "
-                        + "budgets: %s, shedding: %s, io threads: %s, notices at %s, events: %s%s%n",
+                        + "budgets: %s, shedding: %s, io threads: %s, notices at %s, events: %s, bidding: %s%s%n",
                 server.port(), index.size(),
                 "none".equals(pacingMode) ? "none" : "even (burst " + pacingBurst + ")",
                 profileMode, profileTimeoutMillis,
@@ -146,6 +171,8 @@ public final class BidderMain {
                 (ioThreads == 0) ? "default" : String.valueOf(ioThreads),
                 publicUrl,
                 (kafka == null) ? "off" : "kafka " + kafkaBootstrap + " topic " + settlementsTopic,
+                (ctrModel == null) ? "fixed prices"
+                        : "ctr model " + ctrModel.version() + " (reference " + referenceCtr + ", cap " + maxMultiplier + "x)",
                 (simulatedWorkMicros > 0) ? ", simulated work " + simulatedWorkMicros + "us/bid" : "");
     }
 }
