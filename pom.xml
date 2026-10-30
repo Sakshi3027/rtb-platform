@@ -15,6 +15,7 @@
         <module>bidder</module>
         <module>stream-jobs</module>
         <module>billing</module>
+        <module>campaign-service</module>
     </modules>
 
     <properties>
