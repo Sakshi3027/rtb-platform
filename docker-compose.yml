@@ -31,3 +31,18 @@ services:
     container_name: rtb-kafka
     ports:
       - "9092:9092"
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: rtb-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: rtb
+      POSTGRES_PASSWORD: rtb
+      POSTGRES_DB: billing
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "rtb", "-d", "billing"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
