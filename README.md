@@ -2,7 +2,7 @@
 
 ![CI](https://github.com/Sakshi3027/rtb-platform/actions/workflows/ci.yml/badge.svg)
 
-A real-time bidding (RTB) platform in Java 21: a low-latency bidder that answers OpenRTB bid requests in about 0.1 ms, enforces campaign budgets across a fleet with Redis-backed leasing, caps ad frequency per user, looks up audience profiles in Aerospike under a strict deadline, and stays correct when its dependencies fail or traffic exceeds capacity. Every auction outcome flows through an exactly-once pipeline (Kafka, Flink, Postgres) into a billing ledger that reconciles with the bidder to the micro. Every claim below comes from a measurement in this repo.
+A real-time bidding (RTB) platform in Java 21: a low-latency bidder that answers OpenRTB bid requests in about 0.1 ms, enforces campaign budgets across a fleet with Redis-backed leasing, caps ad frequency per user, looks up audience profiles in Aerospike under a strict deadline, and stays correct when its dependencies fail or traffic exceeds capacity. Every auction outcome flows through an exactly-once pipeline (Kafka, Flink, Postgres) into a billing ledger that reconciles with the bidder to the micro. An in-process ONNX click model prices each impression by its expected value. Every claim below comes from a measurement in this repo.
 
 ## Highlights
 
@@ -19,7 +19,9 @@ A real-time bidding (RTB) platform in Java 21: a low-latency bidder that answers
 | Flink deduplication | **500 replayed duplicates in, 0 out**; output stayed at exactly 6,425 unique events |
 | Billing ledger | After a **SIGKILL of the billing consumer** mid-stream: 12,143 settlements, 6,488 wins, 7,959,567 micros, **identical** to the bidder |
 | Reconciliation caught a real bug | Cross-system totals exposed **6,361 settlements silently dropped** by an event ID collision; fixed with bidder-generated IDs |
-| Tests | **176 tests**, including Testcontainers suites against real Redis, Aerospike, Kafka, and Postgres, and chaos tests that freeze, kill, or crash components mid-traffic on every CI run |
+| CTR model | Gradient-boosted trees closed **93% of the gap** to the best possible log loss; logistic regression only 38%, because ad relevance is a feature interaction |
+| Expected-value bidding | **26 µs** inference per request, **87%** prediction-cache hit rate, no added median latency; per-campaign normalization cut cost per click below fixed prices, while a global baseline **overpaid by 22%** |
+| Tests | **200 tests**, including a golden-file test that Java reproduces Python's model predictions, Testcontainers suites against real Redis, Aerospike, Kafka, and Postgres, and chaos tests that freeze, kill, or crash components mid-traffic on every CI run |
 
 ## Architecture
 
@@ -114,6 +116,18 @@ bid ──reserve──> PENDING ──win notice──> charge the clearing pri
 
 After adding the full pipeline, a run with a `kill -9` of the billing consumer showed the ledger at almost exactly half the bidder's totals. Tracing counts stage by stage showed Kafka had every event, but Flink had output only 12,428 of 18,789. Flink was healthy; its dedup had dropped **6,361 real settlements**. The simulator's request IDs are deterministic, so a second run reused `req-g0-0`, `req-g0-1`, and so on, and event IDs derived from them collided with the previous run's IDs. Every component passed its own tests; only reconciling four independent systems exposed the bug. The fix was bidder-generated globally unique bid IDs, which also fixed a second bug where a repeated request ID overwrote a pending reservation and leaked its budget. Rerunning the exact scenario, with two identical runs and a SIGKILL mid-stream, reconciled exactly.
 
+### Machine learning
+
+**A known ground truth.** The simulator holds a hidden click model: a base rate of about 0.7%, effects for ad size, country, and creative, a boost when the site's category matches the campaign's theme, a larger boost when the user has the campaign's audience segment, and an extra boost when both match. Training data assigns campaigns uniformly at random, like an exploration slice of real traffic, to avoid the selection bias of logging only what a policy chose. Because the truth is known, every model is scored against the best achievable log loss.
+
+**Relevance is a feature interaction.** "This ad, on this site, for this user" cannot be expressed by a linear model over one-hot features, which can only add separate weights for campaign, category, and segment. Logistic regression closed only 38% of the gap between a constant baseline and the oracle, and predicted about one fifth of the true CTR on the most valuable impressions. Gradient-boosted trees, which learn combinations through their splits, closed 93%.
+
+**No training-serving skew by construction.** Feature extraction is one shared Java record used by both the data generator and the bidder. The one-hot encoder is exported inside the ONNX model, so serving passes raw strings and never re-implements the encoding. A CI test requires the Java bidder to reproduce 1,000 Python predictions within 1e-5, and the model's input names are checked at startup, so a model trained on different features stops the bidder at deploy time instead of producing silent garbage.
+
+**Inference built for the hot path.** One ONNX Runtime session is loaded at startup and shared by all threads, with one thread per call: small batches are faster without intra-op parallelism, and extra threads would compete with the event loops. All eligible campaigns of a request are predicted in one batched call, and predictions are cached by their exact features, which works because every feature is categorical, so the feature space is small and repeats. If the model throws or returns an invalid probability, that request falls back to fixed prices; bidding never stops.
+
+**Bid on expected value, normalized per campaign.** A campaign's price is treated as the value of its average impression, and each impression is valued at `price x predicted CTR / campaign average CTR`, capped at 3x. The first version normalized against the training data's average CTR, but a campaign only bids on the traffic its targeting selects, which is more relevant than average, so it raised prices across the board and paid 22% more per click. Normalizing against each campaign's own average on the traffic it actually sees keeps its multipliers centered on 1 and moves spend toward its most clickable impressions.
+
 ### Measurement
 
 **Open-loop load testing.** The simulator sends requests on a fixed schedule regardless of how the bidder responds and measures latency from each request's scheduled send time, avoiding coordinated omission. It reports both response time (what the exchange sees) and service time (bidder plus network only).
@@ -174,6 +188,40 @@ Environment: a single MacBook Air (Apple Silicon, 16 GB), with every service on 
 | Settlements | 12,143 | 12,143 |
 | Charged (micros) | 7,959,567 | 7,959,567 |
 
+**CTR models on 1,000,000 held-out impressions** (trained on 3,000,000; normalized entropy is log loss divided by a constant-rate baseline, lower is better)
+
+| Model | Normalized entropy | Gap closed to the oracle | AUC | Calibration | Calibration on high-CTR impressions |
+|---|---|---|---|---|---|
+| Oracle (true CTR) | 0.9594 | 100% | 0.663 | 1.004 | 1.000 |
+| Gradient-boosted trees | **0.9621** | **93.4%** | 0.658 | 1.004 | 0.907 |
+| Logistic regression | 0.9846 | 38.0% | 0.616 | 1.002 | 0.212 |
+| Constant baseline | 1.0000 | 0% | 0.500 | 1.005 | 0.126 |
+
+The exported ONNX model matches scikit-learn to within 1.3e-7 across all 1,000,000 test rows.
+
+**CTR inference latency** (single thread, 100,000 calls per batch size)
+
+| Campaigns per call | p50 | p99 | Predictions per second |
+|---|---|---|---|
+| 1 | 18.6 µs | 50.6 µs | 48,050 |
+| 3 | 26.0 µs | 48.6 µs | 91,682 |
+| 10 | 45.8 µs | 108.7 µs | 199,988 |
+
+In the bidder at 2,000 QPS, 87% of valuations were served from the prediction cache, the model never fell back, and median bidder latency was unchanged at 0.13 ms.
+
+**Bidding policy A/B test** (same seed, 2,000 QPS for 20 s; clicks drawn from the hidden ground truth)
+
+| | Fixed prices | CTR, global baseline | CTR, per-campaign baseline |
+|---|---|---|---|
+| Spend | $8.18 | $16.61 | $9.72 |
+| Wins | 6,684 | 7,946 | 6,522 |
+| Expected clicks | 96.6 | 159.5 | **121.8** |
+| CTR of won impressions | 1.45% | 2.01% | 1.87% |
+| Cost per expected click | $0.085 | $0.104 | **$0.080** |
+| Expected clicks per dollar | 11.81 | 9.60 | **12.53** |
+
+Per-campaign normalization bought fewer impressions that were 29% more likely to be clicked, and its extra spend over fixed prices bought clicks at $0.061 each, below the fixed-price average of $0.085. The global baseline doubled spend and paid 22% more per click. Expected clicks are the sum of the true click probabilities of won impressions: the same quantity as clicks, without the coin-flip noise (actual clicks were 96, 159, and 126).
+
 ## Resilience and correctness, verified in CI
 
 These run on every push against real containers, using Testcontainers to freeze (`docker pause`) or kill (`docker stop`) a dependency mid-traffic, or to crash a component at the worst possible moment:
@@ -187,6 +235,8 @@ These run on every push against real containers, using Testcontainers to freeze 
 | `BillingStoreTest` | Crash before commit | Neither the events nor the offsets survive |
 | `SettlementDedupTest` | Duplicate and conflicting copies of events | Each event ID emitted once, first copy wins |
 | `TargetingBidEngineNoticeTest` | The same exchange request ID twice | Two independent bids, both reservations tracked and fully released |
+| `OnnxCtrModelTest` | Java inference vs. Python | All 1,000 golden predictions reproduced within 1e-5; unseen values still yield a valid probability |
+| `CtrValuerTest` | Model throws or returns NaN | Bidding falls back to fixed prices; predictions are batched, cached, and capped |
 
 ## Modules
 
@@ -196,10 +246,11 @@ exchange-simulator/  open-loop load driver, traffic generator (Zipf users), auct
 bidder/              Netty server, targeting, pricing, budgets, settlement, frequency caps, profiles, resilience
 stream-jobs/         Flink job that deduplicates settlement events with an exactly-once Kafka sink
 billing/             Kafka-to-Postgres billing consumer with offsets stored in the ledger
+ml/                  CTR training script, exported ONNX model, golden predictions, metrics
 scripts/             start/stop a bidder fleet, reconcile fleet spend against Redis
 ```
 
-Tech: Java 21, Netty 4.1, Jackson, Lettuce + Redis 7.4, Aerospike CE 8.1, Kafka 4.1 (KRaft), Flink 2.0, Postgres 17, Caffeine, HdrHistogram, JUnit 5, Testcontainers, Docker Compose, GitHub Actions.
+Tech: Java 21, Netty 4.1, Jackson, Lettuce + Redis 7.4, Aerospike CE 8.1, Kafka 4.1 (KRaft), Flink 2.0, Postgres 17, ONNX Runtime 1.21, scikit-learn, Caffeine, HdrHistogram, JUnit 5, Testcontainers, Docker Compose, GitHub Actions.
 
 ## Running it
 
@@ -207,7 +258,7 @@ Prerequisites: Java 21, Maven 3.9+, Docker.
 
 ```bash
 docker compose up -d                 # Redis, Aerospike, Kafka, Postgres
-mvn clean verify                     # build and run all 176 tests
+mvn clean verify                     # build and run all 200 tests
 
 # load 100,000 synthetic user profiles into Aerospike
 java -cp bidder/target/bidder-0.1.0-SNAPSHOT.jar com.sakshichavan.rtb.bidder.profile.ProfileSeeder
@@ -239,6 +290,21 @@ java -jar exchange-simulator/target/exchange-simulator-0.1.0-SNAPSHOT.jar run \
 docker exec rtb-postgres psql -U rtb -d billing -c "SELECT * FROM campaign_spend ORDER BY spent_micros DESC;"
 ```
 
+Train the CTR model and bid with it:
+
+```bash
+java -cp exchange-simulator/target/exchange-simulator-0.1.0-SNAPSHOT.jar \
+  com.sakshichavan.rtb.simulator.DataGenerator --rows 3000000 --seed 2026 --out data/train.csv
+java -cp exchange-simulator/target/exchange-simulator-0.1.0-SNAPSHOT.jar \
+  com.sakshichavan.rtb.simulator.DataGenerator --rows 1000000 --seed 99 --out data/test.csv
+python3 -m venv ml/.venv && source ml/.venv/bin/activate && pip install -r ml/requirements.txt
+python ml/train_ctr.py --train data/train.csv --test data/test.csv
+mvn clean verify                     # the bidder picks up ml/artifacts/ctr-v1.onnx and checks the golden file
+
+java -cp bidder/target/bidder-0.1.0-SNAPSHOT.jar com.sakshichavan.rtb.bidder.ml.CtrBenchmark
+BIDDING=ctr java -jar bidder/target/bidder-0.1.0-SNAPSHOT.jar
+```
+
 Fleet of three with consistent-hash routing, a frequency audit, and budget reconciliation:
 
 ```bash
@@ -265,6 +331,10 @@ scripts/stop-bidders.sh
 | `PACING` / `PACING_BURST` | `even` / 0.02 | Budget pacing mode and how far ahead of schedule spend may run |
 | `LEASE_CHUNK_USD` | 0.50 | Budget leased per Redis call |
 | `BID_SHADING_FACTOR` | 0.5 | First-price shading (1.0 = bid full value) |
+| `BIDDING` | `fixed` | `ctr` to bid on expected value from the CTR model |
+| `CTR_NORMALIZATION` | `campaign` | `campaign` compares each impression with its campaign's own average CTR; `global` uses `CTR_REFERENCE` |
+| `CTR_REFERENCE` / `CTR_MAX_MULTIPLIER` | 0.0087 / 3.0 | Global average CTR (also the cold-start reference), and the cap on value relative to a campaign's price |
+| `CTR_MODEL_PATH` | bundled | Load a newly trained model without rebuilding |
 | `RESERVATION_TTL_SECONDS` | 60 | How long to wait for a notice before releasing a reservation |
 | `KAFKA_BOOTSTRAP` / `SETTLEMENTS_TOPIC` | unset / `rtb.settlements` | Publish settlement events; unset disables events |
 | `SHEDDING` | `on` | Deadline-aware load shedding |
@@ -285,11 +355,16 @@ scripts/stop-bidders.sh
 - **Leasing strands some budget** in each instance's local lease, bounded by about 1.2 chunks per campaign per instance.
 - **Under sustained overload the FIFO queue settles at the 20 ms limit**, so admitted requests wait about 20 ms. Adaptive LIFO with a CoDel-style target would serve most admitted requests in about 1 ms.
 - **HTTP pipelining is not supported**: async responses on one connection could complete out of order. Exchanges and the simulator use one request in flight per connection.
+- **The CTR model is trained on synthetic exploration data** with a known ground truth. Real logs contain only impressions a policy chose and won, which calls for counterfactual corrections such as inverse propensity weighting.
+- **Per-campaign CTR baselines are all-time averages.** Production would use an exponentially weighted moving average so each baseline follows traffic changes over the day.
+- **Expected-value bidding is only approximately budget-neutral**: the per-campaign policy spent 19% more than fixed prices. Exact spend control is left to pacing.
+- **Each bidding policy was measured in a single run.** A rigorous comparison would repeat each with several seeds and report the spread.
+- **The bidder jar bundles ONNX Runtime for every platform** (164 MB); container images will keep only the Linux library.
 - **All benchmarks ran on one laptop.** Dedicated machines with pinned CPUs are needed for trustworthy tail latency.
 
 ## Roadmap
 
-- In-process CTR model (ONNX) to bid on expected value within a strict latency budget
+- Model lifecycle: retraining on logged clicks with propensity weighting, shadow scoring, and safe rollout
 - Campaign management service and dashboard
 - Kubernetes, Helm, and Terraform deployment, including Flink with retained checkpoints
 - Prometheus, Grafana, and OpenTelemetry tracing
