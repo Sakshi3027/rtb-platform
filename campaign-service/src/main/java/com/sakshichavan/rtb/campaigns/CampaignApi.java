@@ -36,6 +36,7 @@ public final class CampaignApi implements AutoCloseable {
         server.createContext("/campaigns", this::handleCampaigns);
         server.createContext("/changes", this::handleChanges);
         server.createContext("/health", exchange -> respond(exchange, 200, Map.of("status", "ok"), null));
+        server.createContext("/outbox", exchange -> respond(exchange, 200, store.outboxStatus(OutboxRelay.PUBLISHER), null));
         server.setExecutor(executor);
         server.start();
     }

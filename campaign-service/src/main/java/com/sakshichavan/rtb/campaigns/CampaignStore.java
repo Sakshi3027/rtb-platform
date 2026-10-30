@@ -39,6 +39,11 @@ public final class CampaignStore implements AutoCloseable {
                 changed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
                 UNIQUE (campaign_id, version)
             );
+            CREATE TABLE IF NOT EXISTS outbox_position (
+                publisher     TEXT PRIMARY KEY,
+                last_revision BIGINT NOT NULL,
+                updated_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+            );
             """;
 
     private static final long WRITE_LOCK_KEY = 7_240_001L;
@@ -235,6 +240,52 @@ public final class CampaignStore implements AutoCloseable {
         } catch (SQLException e) {
             throw new IllegalStateException("campaign database error", e);
         }
+    }
+
+    /** The last revision this publisher has delivered, or 0 if it has never published. */
+    public long publishedRevision(String publisher) {
+        return read(connection -> {
+            try (PreparedStatement query = connection.prepareStatement(
+                    "SELECT last_revision FROM outbox_position WHERE publisher = ?")) {
+                query.setString(1, publisher);
+                try (ResultSet rows = query.executeQuery()) {
+                    return rows.next() ? rows.getLong(1) : 0L;
+                }
+            }
+        });
+    }
+
+    /** Records progress; the position only ever moves forward, so a late or repeated call cannot rewind it. */
+    public void markPublished(String publisher, long revision) {
+        read(connection -> {
+            try (PreparedStatement upsert = connection.prepareStatement("""
+                    INSERT INTO outbox_position (publisher, last_revision) VALUES (?, ?)
+                    ON CONFLICT (publisher) DO UPDATE
+                    SET last_revision = GREATEST(outbox_position.last_revision, EXCLUDED.last_revision),
+                        updated_at = now()""")) {
+                upsert.setString(1, publisher);
+                upsert.setLong(2, revision);
+                upsert.executeUpdate();
+            }
+            return null;
+        });
+    }
+
+    public long latestRevision() {
+        return read(connection -> {
+            try (PreparedStatement query = connection.prepareStatement(
+                    "SELECT coalesce(max(revision), 0) FROM campaign_changes");
+                 ResultSet rows = query.executeQuery()) {
+                rows.next();
+                return rows.getLong(1);
+            }
+        });
+    }
+
+    public OutboxStatus outboxStatus(String publisher) {
+        long published = publishedRevision(publisher);
+        long latest = latestRevision();
+        return new OutboxStatus(publisher, published, latest, latest - published);
     }
 
     @Override
