@@ -38,7 +38,7 @@ public final class OpenRtbJson {
         return read(json, BidResponse.class);
     }
 
-    private static <T> T read(byte[] json, Class<T> type) {
+    public static <T> T read(byte[] json, Class<T> type) {
         try {
             return MAPPER.readValue(json, type);
         } catch (IOException e) {

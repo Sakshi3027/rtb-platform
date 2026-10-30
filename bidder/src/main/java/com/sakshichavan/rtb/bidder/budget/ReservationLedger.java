@@ -4,6 +4,8 @@ import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.Scheduler;
 import com.sakshichavan.rtb.bidder.NoticeSink;
+import com.sakshichavan.rtb.bidder.events.SettlementPublisher;
+import com.sakshichavan.rtb.common.events.SettlementEvent;
 import com.sakshichavan.rtb.common.money.Micros;
 
 import java.net.URLEncoder;
@@ -20,6 +22,7 @@ import java.util.function.LongSupplier;
  *
  * Exactly-once: settling starts with an atomic remove of the pending reservation, so only the first notice
  * for a bid can settle it; retried or duplicate notices find nothing and change nothing.
+ * Every settlement is published as exactly one event (WIN, LOSS, or EXPIRED).
  */
 public final class ReservationLedger implements NoticeSink {
 
@@ -28,6 +31,7 @@ public final class ReservationLedger implements NoticeSink {
 
     private final CampaignBudgets budgets;
     private final String noticeBaseUrl;
+    private final SettlementPublisher publisher;
     private final Cache<String, Reservation> pending;
 
     private final LongAdder wins = new LongAdder();
@@ -38,8 +42,14 @@ public final class ReservationLedger implements NoticeSink {
     private final LongAdder releasedMicros = new LongAdder();
 
     public ReservationLedger(CampaignBudgets budgets, String noticeBaseUrl, Duration ttl, LongSupplier nanoClock) {
+        this(budgets, noticeBaseUrl, ttl, nanoClock, SettlementPublisher.NONE);
+    }
+
+    public ReservationLedger(CampaignBudgets budgets, String noticeBaseUrl, Duration ttl, LongSupplier nanoClock,
+                             SettlementPublisher publisher) {
         this.budgets = budgets;
         this.noticeBaseUrl = noticeBaseUrl;
+        this.publisher = publisher;
         this.pending = Caffeine.newBuilder()
                 .expireAfterWrite(ttl)
                 .maximumSize(2_000_000)
@@ -47,9 +57,11 @@ public final class ReservationLedger implements NoticeSink {
                 .scheduler(Scheduler.systemScheduler())
                 .executor(Runnable::run)
                 .<String, Reservation>removalListener((bidId, reservation, cause) -> {
-                    if (reservation != null && cause.wasEvicted()) {
+                    if (bidId != null && reservation != null && cause.wasEvicted()) {
                         expired.increment();
                         release(reservation, reservation.micros());
+                        publisher.publish(SettlementEvent.expired(
+                                bidId, reservation.campaignId(), reservation.micros(), System.currentTimeMillis()));
                     }
                 })
                 .build();
@@ -78,6 +90,8 @@ public final class ReservationLedger implements NoticeSink {
         wins.increment();
         spentMicros.add(cost);
         release(reservation, reservation.micros() - cost);
+        publisher.publish(SettlementEvent.win(
+                bidId, reservation.campaignId(), reservation.micros(), cost, System.currentTimeMillis()));
     }
 
     @Override
@@ -89,6 +103,8 @@ public final class ReservationLedger implements NoticeSink {
         }
         losses.increment();
         release(reservation, reservation.micros());
+        publisher.publish(SettlementEvent.loss(
+                bidId, reservation.campaignId(), reservation.micros(), System.currentTimeMillis()));
     }
 
     /** Runs pending expirations now. Expiry also happens automatically during normal use. */

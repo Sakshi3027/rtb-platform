@@ -9,6 +9,8 @@ import com.sakshichavan.rtb.bidder.budget.ReservationLedger;
 import com.sakshichavan.rtb.bidder.campaign.Campaign;
 import com.sakshichavan.rtb.bidder.campaign.CampaignLoader;
 import com.sakshichavan.rtb.bidder.campaign.TargetingIndex;
+import com.sakshichavan.rtb.bidder.events.KafkaSettlementPublisher;
+import com.sakshichavan.rtb.bidder.events.SettlementPublisher;
 import com.sakshichavan.rtb.bidder.frequency.FrequencyCapper;
 import com.sakshichavan.rtb.bidder.profile.AerospikeProfileStore;
 import com.sakshichavan.rtb.bidder.profile.ProfileStore;
@@ -53,6 +55,8 @@ public final class BidderMain {
         int queueCapacity = Integer.parseInt(env("QUEUE_CAPACITY", "2000"));
         long maxQueueDelayMillis = Long.parseLong(env("MAX_QUEUE_DELAY_MS", "20"));
         long simulatedWorkMicros = Long.parseLong(env("SIMULATED_WORK_MICROS", "0"));
+        String settlementsTopic = env("SETTLEMENTS_TOPIC", "rtb.settlements");
+        String kafkaBootstrap = System.getenv("KAFKA_BOOTSTRAP");
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
         String redisUri = System.getenv("REDIS_URI");
 
@@ -68,8 +72,16 @@ public final class BidderMain {
                 : new RedisBudgetSource(redisUri, clock, pacing);
         CampaignBudgets budgets = new CampaignBudgets(budgetSource, leaseChunkMicros, leaseChunkMicros / 5, System::nanoTime);
         budgets.initialize(campaigns).toCompletableFuture().join();
+
+        KafkaSettlementPublisher kafka = (kafkaBootstrap == null)
+                ? null
+                : new KafkaSettlementPublisher(kafkaBootstrap, settlementsTopic);
+        if (kafka != null) {
+            kafka.awaitReady(Duration.ofSeconds(30));
+        }
+        SettlementPublisher publisher = (kafka != null) ? kafka : SettlementPublisher.NONE;
         ReservationLedger ledger = new ReservationLedger(
-                budgets, publicUrl, Duration.ofSeconds(reservationTtlSeconds), System::nanoTime);
+                budgets, publicUrl, Duration.ofSeconds(reservationTtlSeconds), System::nanoTime, publisher);
 
         Duration longestCapWindow = campaigns.stream()
                 .map(Campaign::frequencyCap)
@@ -103,6 +115,9 @@ public final class BidderMain {
             stats.put("campaigns", budgets.stats());
             stats.put("profiles", pipeline.stats());
             stats.put("notices", ledger.stats());
+            if (kafka != null) {
+                stats.put("events", kafka.stats());
+            }
             if (admission != null) {
                 stats.put("admission", admission.stats());
             }
@@ -115,11 +130,14 @@ public final class BidderMain {
             }
             pipeline.close();
             profileStore.close();
+            if (kafka != null) {
+                kafka.close();
+            }
             budgetSource.close();
         }));
 
         System.out.printf("bidder listening on port %d with %d campaigns, pacing %s, profiles: %s (timeout %dms), "
-                        + "budgets: %s, shedding: %s, io threads: %s, notices at %s%s%n",
+                        + "budgets: %s, shedding: %s, io threads: %s, notices at %s, events: %s%s%n",
                 server.port(), index.size(),
                 "none".equals(pacingMode) ? "none" : "even (burst " + pacingBurst + ")",
                 profileMode, profileTimeoutMillis,
@@ -127,6 +145,7 @@ public final class BidderMain {
                 shedding ? "on (" + workerThreads + " workers, max queue delay " + maxQueueDelayMillis + "ms)" : "off",
                 (ioThreads == 0) ? "default" : String.valueOf(ioThreads),
                 publicUrl,
+                (kafka == null) ? "off" : "kafka " + kafkaBootstrap + " topic " + settlementsTopic,
                 (simulatedWorkMicros > 0) ? ", simulated work " + simulatedWorkMicros + "us/bid" : "");
     }
 }
