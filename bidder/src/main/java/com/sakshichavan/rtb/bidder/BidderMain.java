@@ -62,6 +62,10 @@ public final class BidderMain {
         double referenceCtr = Double.parseDouble(env("CTR_REFERENCE", "0.0087"));
         double maxMultiplier = Double.parseDouble(env("CTR_MAX_MULTIPLIER", "3.0"));
         long ctrCacheSize = Long.parseLong(env("CTR_CACHE_SIZE", "500000"));
+        CtrValuer.Normalization normalization = "global".equals(env("CTR_NORMALIZATION", "campaign"))
+                ? CtrValuer.Normalization.GLOBAL
+                : CtrValuer.Normalization.PER_CAMPAIGN;
+        long ctrMinSamples = Long.parseLong(env("CTR_MIN_SAMPLES", "200"));
         String ctrModelFile = System.getenv("CTR_MODEL_PATH");
         String kafkaBootstrap = System.getenv("KAFKA_BOOTSTRAP");
         String campaignsFile = System.getenv("CAMPAIGNS_FILE");
@@ -104,7 +108,7 @@ public final class BidderMain {
             ctrModel = (ctrModelFile == null)
                     ? OnnxCtrModel.fromClasspath("/models/ctr-v1.onnx")
                     : OnnxCtrModel.fromFile(Path.of(ctrModelFile));
-            ctrValuer = new CtrValuer(ctrModel, referenceCtr, maxMultiplier, ctrCacheSize);
+            ctrValuer = new CtrValuer(ctrModel, referenceCtr, maxMultiplier, ctrCacheSize, normalization, ctrMinSamples);
         }
         CampaignValuer valuer = (ctrValuer != null) ? ctrValuer : CampaignValuer.FIXED;
 
@@ -136,6 +140,7 @@ public final class BidderMain {
             stats.put("notices", ledger.stats());
             if (statsValuer != null) {
                 stats.put("bidding", statsValuer.stats());
+                stats.put("ctrBaselines", statsValuer.baselines());
             }
             if (kafka != null) {
                 stats.put("events", kafka.stats());
@@ -172,7 +177,8 @@ public final class BidderMain {
                 publicUrl,
                 (kafka == null) ? "off" : "kafka " + kafkaBootstrap + " topic " + settlementsTopic,
                 (ctrModel == null) ? "fixed prices"
-                        : "ctr model " + ctrModel.version() + " (reference " + referenceCtr + ", cap " + maxMultiplier + "x)",
+                        : "ctr model " + ctrModel.version() + " (" + normalization + " normalization, reference "
+                                + referenceCtr + ", cap " + maxMultiplier + "x)",
                 (simulatedWorkMicros > 0) ? ", simulated work " + simulatedWorkMicros + "us/bid" : "");
     }
 }

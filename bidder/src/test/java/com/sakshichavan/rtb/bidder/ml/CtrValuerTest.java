@@ -83,4 +83,38 @@ class CtrValuerTest {
         assertEquals(1, failing.stats().fallbacks());
         assertEquals(1, invalid.stats().fallbacks());
     }
+
+    @Test
+    void perCampaignNormalizationCentersEachCampaignOnItsOwnAverage() {
+        Campaign campaign = new Campaign("average", "cr-a", 2.00, 10.0, null);
+        Imp large = new Imp("1", new Banner(300, 250), 0.10, "USD");
+        Imp small = new Imp("1", new Banner(728, 90), 0.10, "USD");
+        CtrModel bySize = rows -> rows.stream().mapToDouble(row -> row.size().equals("300x250") ? 0.04 : 0.02).toArray();
+        CtrValuer valuer = new CtrValuer(bySize, 0.01, 3.0, 1_000, CtrValuer.Normalization.PER_CAMPAIGN, 10);
+
+        for (int i = 0; i < 50; i++) {
+            valuer.valuesCpm(REQUEST, large, UserProfile.UNKNOWN, List.of(campaign));
+            valuer.valuesCpm(REQUEST, small, UserProfile.UNKNOWN, List.of(campaign));
+        }
+        double largeValue = valuer.valuesCpm(REQUEST, large, UserProfile.UNKNOWN, List.of(campaign))[0];
+
+        assertEquals(0.03, valuer.baselines().get("average"), 1e-4);
+        assertEquals(2.00 * 0.04 / 0.03, largeValue, 1e-6, "twice the CTR of the small slot, centered on the average");
+    }
+
+    @Test
+    void perCampaignNormalizationUsesTheGlobalReferenceUntilItHasEnoughSamples() {
+        Campaign campaign = new Campaign("average", "cr-a", 2.00, 10.0, null);
+        CtrValuer valuer = new CtrValuer(rows -> new double[] {0.02}, 0.01, 3.0, 1_000,
+                CtrValuer.Normalization.PER_CAMPAIGN, 10);
+
+        double first = valuer.valuesCpm(REQUEST, IMP, UserProfile.UNKNOWN, List.of(campaign))[0];
+        for (int i = 0; i < 10; i++) {
+            valuer.valuesCpm(REQUEST, IMP, UserProfile.UNKNOWN, List.of(campaign));
+        }
+        double settled = valuer.valuesCpm(REQUEST, IMP, UserProfile.UNKNOWN, List.of(campaign))[0];
+
+        assertEquals(4.00, first, 1e-9, "cold start: 0.02 / global 0.01 = 2x");
+        assertEquals(2.00, settled, 1e-9, "after warm-up: 0.02 / its own average 0.02 = 1x");
+    }
 }

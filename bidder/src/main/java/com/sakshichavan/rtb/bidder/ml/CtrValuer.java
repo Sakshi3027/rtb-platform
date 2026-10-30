@@ -11,12 +11,22 @@ import com.sakshichavan.rtb.common.openrtb.Imp;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.TreeMap;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.DoubleAdder;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
  * Values an impression by its predicted click probability: value = maxBidCpm x predicted CTR / reference CTR,
- * where maxBidCpm is what an average impression is worth and the reference CTR is the average the model was trained
- * on. The value is capped at maxMultiplier x maxBidCpm so an extreme prediction cannot produce an extreme bid.
+ * capped at maxMultiplier x maxBidCpm so an extreme prediction cannot produce an extreme bid.
+ *
+ * GLOBAL normalization uses one reference CTR, the average of the training data. But training data assigns
+ * campaigns at random, while a campaign only bids on the traffic its targeting selects, which is usually more
+ * relevant than average, so GLOBAL raises a targeted campaign's prices across the board.
+ * PER_CAMPAIGN normalization compares each impression with that campaign's own average predicted CTR on the traffic
+ * it actually sees, so its multipliers average about 1: spend stays similar, and moves toward the campaign's most
+ * clickable impressions. Until a campaign has minSamples valuations, the global reference is used.
  *
  * All uncached campaigns of a request are predicted in one batched model call. Predictions are cached by their exact
  * features: the model is deterministic and every feature is categorical, so the feature space is small and repeats.
@@ -24,10 +34,24 @@ import java.util.concurrent.atomic.LongAdder;
  */
 public final class CtrValuer implements CampaignValuer {
 
+    public enum Normalization {
+        GLOBAL,
+        PER_CAMPAIGN
+    }
+
+    /** A campaign's running average of predicted CTR: thread-safe sum and count. */
+    private static final class Baseline {
+        final DoubleAdder sum = new DoubleAdder();
+        final LongAdder count = new LongAdder();
+    }
+
     private final CtrModel model;
     private final double referenceCtr;
     private final double maxMultiplier;
+    private final Normalization normalization;
+    private final long minSamples;
     private final Cache<ImpressionFeatures, Double> cache;
+    private final Map<String, Baseline> baselines = new ConcurrentHashMap<>();
 
     private final LongAdder lookups = new LongAdder();
     private final LongAdder cacheHits = new LongAdder();
@@ -35,6 +59,11 @@ public final class CtrValuer implements CampaignValuer {
     private final LongAdder fallbacks = new LongAdder();
 
     public CtrValuer(CtrModel model, double referenceCtr, double maxMultiplier, long cacheSize) {
+        this(model, referenceCtr, maxMultiplier, cacheSize, Normalization.GLOBAL, 0);
+    }
+
+    public CtrValuer(CtrModel model, double referenceCtr, double maxMultiplier, long cacheSize,
+                     Normalization normalization, long minSamples) {
         if (!(referenceCtr > 0 && referenceCtr < 1)) {
             throw new IllegalArgumentException("reference CTR must be in (0, 1): " + referenceCtr);
         }
@@ -44,6 +73,8 @@ public final class CtrValuer implements CampaignValuer {
         this.model = model;
         this.referenceCtr = referenceCtr;
         this.maxMultiplier = maxMultiplier;
+        this.normalization = normalization;
+        this.minSamples = minSamples;
         this.cache = Caffeine.newBuilder().maximumSize(cacheSize).build();
     }
 
@@ -89,10 +120,25 @@ public final class CtrValuer implements CampaignValuer {
 
         double[] values = new double[n];
         for (int i = 0; i < n; i++) {
-            double multiplier = Math.min(maxMultiplier, ctr[i] / referenceCtr);
-            values[i] = campaigns.get(i).maxBidCpm() * multiplier;
+            Campaign campaign = campaigns.get(i);
+            double reference = referenceFor(campaign.id(), ctr[i]);
+            double multiplier = Math.min(maxMultiplier, ctr[i] / reference);
+            values[i] = campaign.maxBidCpm() * multiplier;
         }
         return values;
+    }
+
+    /** The CTR an average impression has for this campaign; also records this prediction in its running average. */
+    private double referenceFor(String campaignId, double predictedCtr) {
+        if (normalization == Normalization.GLOBAL) {
+            return referenceCtr;
+        }
+        Baseline baseline = baselines.computeIfAbsent(campaignId, id -> new Baseline());
+        long count = baseline.count.sum();
+        double average = (count > 0) ? baseline.sum.sum() / count : 0;
+        baseline.sum.add(predictedCtr);
+        baseline.count.increment();
+        return (count >= minSamples && average > 0) ? average : referenceCtr;
     }
 
     private double[] fallback(BidRequest request, Imp imp, UserProfile profile, List<Campaign> campaigns) {
@@ -102,5 +148,17 @@ public final class CtrValuer implements CampaignValuer {
 
     public ValuerStats stats() {
         return new ValuerStats(lookups.sum(), cacheHits.sum(), modelCalls.sum(), fallbacks.sum());
+    }
+
+    /** Each campaign's average predicted CTR on the traffic it has seen (PER_CAMPAIGN only), sorted by campaign. */
+    public Map<String, Double> baselines() {
+        Map<String, Double> snapshot = new TreeMap<>();
+        baselines.forEach((campaignId, baseline) -> {
+            long count = baseline.count.sum();
+            if (count > 0) {
+                snapshot.put(campaignId, baseline.sum.sum() / count);
+            }
+        });
+        return snapshot;
     }
 }

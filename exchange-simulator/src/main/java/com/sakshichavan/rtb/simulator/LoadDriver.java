@@ -22,6 +22,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.DoubleAdder;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.concurrent.locks.LockSupport;
 
@@ -30,7 +31,7 @@ import java.util.concurrent.locks.LockSupport;
  * A Router picks the bidder for each request, like the load balancer in front of a fleet.
  * Records response time (from the scheduled send, avoiding coordinated omission), service time
  * (from the actual send), and per-user frequency ground truth for audited campaigns.
- * With an AuctionHouse, it also runs each auction and calls the bid's win or loss notice URL.
+ * With an AuctionHouse, it also runs each auction, calls the bid's win or loss notice URL, and draws clicks.
  */
 public final class LoadDriver implements AutoCloseable {
 
@@ -165,7 +166,7 @@ public final class LoadDriver implements AutoCloseable {
         client.close();
     }
 
-    /** Thread-safe auction and notice counters for one run. */
+    /** Thread-safe auction, notice, and click counters for one run. */
     private static final class Market {
         private final LongAdder won = new LongAdder();
         private final LongAdder lost = new LongAdder();
@@ -175,6 +176,8 @@ public final class LoadDriver implements AutoCloseable {
         private final LongAdder duplicates = new LongAdder();
         private final LongAdder failures = new LongAdder();
         private final LongAdder spendMicros = new LongAdder();
+        private final LongAdder clicks = new LongAdder();
+        private final DoubleAdder expectedClicks = new DoubleAdder();
         private final AtomicInteger outstanding = new AtomicInteger();
 
         void record(AuctionHouse.Outcome outcome) {
@@ -183,6 +186,10 @@ public final class LoadDriver implements AutoCloseable {
                 won.increment();
                 spendMicros.add(Micros.impressionCost(outcome.clearingCpm()));
                 winNotices.add(firstSends);
+                expectedClicks.add(outcome.trueCtr());
+                if (outcome.clicked()) {
+                    clicks.increment();
+                }
             } else {
                 lost.increment();
                 if (outcome.noticeUrls().isEmpty()) {
@@ -203,7 +210,8 @@ public final class LoadDriver implements AutoCloseable {
 
         MarketSummary summary() {
             return new MarketSummary(won.sum(), lost.sum(), silentLosses.sum(), winNotices.sum(),
-                    lossNotices.sum(), duplicates.sum(), failures.sum(), spendMicros.sum());
+                    lossNotices.sum(), duplicates.sum(), failures.sum(), spendMicros.sum(),
+                    clicks.sum(), expectedClicks.sum());
         }
     }
 
